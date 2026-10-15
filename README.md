@@ -234,7 +234,7 @@ If only one account is configured, `--account` can be omitted.
 | `delete` | Soft-delete (move to Trash) by filter | one of `--sender=` (repeatable) / `--subject-contains=` / `--older-than=` / `--recipient=` / `--category=`; optional `--keep=` (repeatable), `--expect-count=` | yes |
 | `move` | Move by filter to target folder | `--to=Folder` plus the same filters as `delete` | yes |
 | `archive` | Bulk-move messages older than N → `Archive/YYYY` | `--older-than=12m` | yes |
-| `unsubscribe` | Parse `List-Unsubscribe` header, execute HTTPS one-click only; `mailto:`-only senders are listed under `manual_unsubscribe` and their mail is kept (the package sends no mail) | `--sender=` | yes |
+| `unsubscribe` | Parse `List-Unsubscribe` header, execute HTTPS one-click only; `mailto:`-only senders are listed under `manual_unsubscribe` and their mail is kept (the package sends no mail). If the HTTPS unsubscribe fails (since 0.4.1), the mail is kept as well and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe` | `--sender=` | yes |
 | `dedupe` | Drop Message-ID duplicates, keep oldest | `--folder=` | yes |
 | `attachments` | List large messages (v1) — strip is v2 | `--size-gt=10mb` | n/a (read-only v1) |
 | `bounces` | Find bounce / auto-reply messages | `--folder=INBOX` | yes |
@@ -301,7 +301,7 @@ Format: one JSON object per line. The `account` field identifies which alias per
 {"timestamp":"2026-05-04T09:27:45.504Z","account":"work","subcommand":"delete","args":{"sender":"service@paypal.de","older_than":"2m"},"folder":"INBOX","affected_uids":["655773","672257"],"result":"success"}
 ```
 
-Fields: `timestamp` (UTC, ISO 8601), `account`, `subcommand` (a CLI subcommand name), `args` (the filter values; `manage.*` records carry `arg_keys` instead), `folder`, `affected_uids`, `result` — always a string: `success`, `partial_failure` or `error` — and `error` (an error code) when the action did not fully succeed.
+Fields: `timestamp` (UTC, ISO 8601), `account`, `subcommand` (a CLI subcommand name), `args` (the filter values; `manage.*` records carry `arg_keys` instead), `folder`, `affected_uids`, `result` — always a string: `success`, `partial_failure` or `error`; `unsubscribe` also writes `manual` (mailto-only, mail kept) and `failed` (the HTTPS unsubscribe failed, mail kept), both with empty `affected_uids` — and `error` (an error code) when the action did not fully succeed.
 
 Only the CLI writes this file. Read-only ad-hoc scripts do not log, and nothing else may append to it.
 

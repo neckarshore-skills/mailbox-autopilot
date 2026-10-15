@@ -114,7 +114,7 @@ Replace `<ACCOUNT>` with the chosen alias (or omit the `--account` flag when onl
 | "Alles an Adresse X" | `mailbox-autopilot delete --account=<ACCOUNT> --recipient x@example.com --json` |
 | "Alle Newsletter ins Archiv" | `mailbox-autopilot move --account=<ACCOUNT> --to Archiv --category newsletter --json` |
 | "Alles älter als 1 Jahr archivieren" | `mailbox-autopilot archive --account=<ACCOUNT> --older-than 12m --json` |
-| "Vom Newsletter X abmelden" | `mailbox-autopilot unsubscribe --account=<ACCOUNT> --sender X --json` (HTTPS one-click only; `mailto:`-only senders come back under `manual_unsubscribe` for the user to unsubscribe by hand, their mail is kept) |
+| "Vom Newsletter X abmelden" | `mailbox-autopilot unsubscribe --account=<ACCOUNT> --sender X --json` (HTTPS one-click only; `mailto:`-only senders come back under `manual_unsubscribe` for the user to unsubscribe by hand, their mail is kept; if the HTTPS unsubscribe fails, the mail is kept too and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe` — tell the user it failed, never that it worked) |
 | "Bounces wegräumen" | `mailbox-autopilot bounces --account=<ACCOUNT> --json` |
 | "Duplikate finden" | `mailbox-autopilot dedupe --account=<ACCOUNT> --json` |
 | "Große Anhänge zeigen" | `mailbox-autopilot attachments --account=<ACCOUNT> --size-gt 10mb --json` |

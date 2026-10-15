@@ -234,6 +234,45 @@ def test_apply_without_list_unsubscribe_header_still_trashes(monkeypatch):
     assert [a["result"] for a in audit] == ["success"]
 
 
+HTTPS_ONLY = [{"kind": "https", "target": "https://example.com/u", "one_click": True}]
+
+
+def test_apply_https_failure_keeps_mail_and_lists_target(monkeypatch):
+    # Founder 2026-10-08 18:02 CEST, "Behalten und auflisten" (SENSEI-planning #54 question 2):
+    # a failed HTTPS unsubscribe must not look like a successful one.
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 500"))
+    payload, moved, audit = _run_apply(monkeypatch, HTTPS_ONLY)
+    assert moved == []
+    assert payload["manual_unsubscribe"] == ["https://example.com/u"]
+    assert [(a["result"], a["affected_uids"]) for a in audit] == [("failed", [])]
+
+
+def test_apply_https_failure_also_lists_mailto_alternative(monkeypatch):
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 404"))
+    payload, moved, _ = _run_apply(
+        monkeypatch,
+        [*HTTPS_ONLY, {"kind": "mailto", "target": "unsub@example.com", "one_click": False}],
+    )
+    assert moved == []
+    assert payload["manual_unsubscribe"] == ["https://example.com/u", "unsub@example.com"]
+
+
+def test_apply_https_failure_text_output_says_mail_kept(monkeypatch):
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 500"))
+    out, moved, _ = _run_apply(monkeypatch, HTTPS_ONLY, flags=("--apply",))
+    assert moved == []
+    assert "FAILED" in out
+    assert "all mail kept" in out
+    assert "https://example.com/u" in out
+
+
+def test_dry_run_https_lists_nothing_manual(monkeypatch):
+    # A dry run has not failed anything yet; the manual list stays empty.
+    payload, moved, audit = _run_apply(monkeypatch, HTTPS_ONLY, flags=("--json",))
+    assert payload["manual_unsubscribe"] == []
+    assert moved == [] and audit == []
+
+
 MAILTO_ONLY = [{"kind": "mailto", "target": "unsub@example.com", "one_click": False}]
 
 
@@ -269,14 +308,16 @@ def test_parse_scheme_is_case_insensitive(header, kind):
 
 def test_apply_failed_https_text_output_reports_failure(monkeypatch):
     monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 500"))
-    out, _, audit = _run_apply(
+    out, moved, audit = _run_apply(
         monkeypatch,
         [{"kind": "https", "target": "https://example.com/u", "one_click": True}],
         flags=("--apply",),
     )
     assert "Performed" not in out
     assert "FAILED" in out and "HTTP 500" in out
-    assert [a["result"] for a in audit] == ["partial"]
+    # Founder 2026-10-08: the mail is kept, so the record is "failed", not "partial".
+    assert moved == []
+    assert [a["result"] for a in audit] == ["failed"]
 
 
 def test_dry_run_mailto_only_text_output_does_not_promise_an_attempt(monkeypatch):
