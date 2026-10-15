@@ -37,6 +37,7 @@ from .operations.delete import PreviewMismatchError, run_delete
 from .operations.move import run_move
 from .operations.selection import CATEGORIES
 from .operations.unsubscribe import (
+    EGRESS_REFUSED_PREFIX,
     UnsubAction,
     collect_unsub_targets,
     perform_unsubscribe,
@@ -868,8 +869,10 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
     """Parse List-Unsubscribe for sender; optionally run HTTPS one-click.
 
     mailto-only senders are listed under manual_unsubscribe and their mail is kept.
-    A failed HTTPS unsubscribe keeps the mail too: the failed link and any mailto
-    alternative are listed under manual_unsubscribe.
+    A failed HTTPS unsubscribe keeps the mail too, reports ok=false and exits 5
+    (unsubscribe_failed): the failed link and any mailto alternative are listed
+    under manual_unsubscribe. A link the egress guard refused is never listed for
+    manual handling; it goes to refused_unsubscribe instead.
     """
     try:
         account, creds = resolve_account_and_credentials(
@@ -885,6 +888,7 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
     actions: list[dict] = []
     results: list[dict] = []
     manual: list[str] = []
+    refused: list[str] = []
     failed = False
     try:
         with imap_connect(creds, port=account.port) as mb:
@@ -902,13 +906,17 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
                     results.append({"action": first, "ok": ok, "info": info})
                     if not ok:
                         # Founder 2026-10-08: a failed unsubscribe keeps the mail and
-                        # lists the target for manual handling (SENSEI-planning #54 Q2).
+                        # lists the target for manual handling.
                         failed = True
-                        manual = [first["target"]] + [
-                            a["target"] for a in actions if a["kind"] == "mailto"
-                        ]
+                        mailto = [a["target"] for a in actions if a["kind"] == "mailto"]
+                        if info.startswith(EGRESS_REFUSED_PREFIX):
+                            # Never hand a person a link the tool refused as unsafe.
+                            refused = [first["target"]]
+                            manual = mailto
+                        else:
+                            manual = [first["target"], *mailto]
                 # HTTPS success or no header: move to Trash. mailto-only or failed: keep.
-                if not manual:
+                if not manual and not failed:
                     trash = resolve_folder(mb, "trash")
                     if trash and uids:
                         move_in_batches(mb, uids, trash)
@@ -926,7 +934,11 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         "actions": actions,
         "results": results,
         "manual_unsubscribe": manual,
+        "refused_unsubscribe": refused,
     }
+    if failed:
+        payload["ok"] = False
+        payload["error_code"] = "unsubscribe_failed"
     if apply:
         if failed:
             result = "failed"
@@ -939,7 +951,7 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
             account=account.alias,
             args={"sender": sender},
             folder=folder,
-            affected_uids=[] if manual else uids,
+            affected_uids=[] if (manual or failed) else uids,
             result=result,
         )
     if json_mode:
@@ -960,6 +972,10 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         if manual:
             label = "Unsubscribe by hand" if failed else "Unsubscribe by hand (mailto only)"
             click.echo(f"{label}: {', '.join(manual)}")
+        if refused:
+            click.echo(f"Refused as unsafe, do not open: {', '.join(refused)}")
+    if failed:
+        sys.exit(5)
 
 
 @cli.command("bounces")

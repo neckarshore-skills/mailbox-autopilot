@@ -234,7 +234,7 @@ If only one account is configured, `--account` can be omitted.
 | `delete` | Soft-delete (move to Trash) by filter | one of `--sender=` (repeatable) / `--subject-contains=` / `--older-than=` / `--recipient=` / `--category=`; optional `--keep=` (repeatable), `--expect-count=` | yes |
 | `move` | Move by filter to target folder | `--to=Folder` plus the same filters as `delete` | yes |
 | `archive` | Bulk-move messages older than N → `Archive/YYYY` | `--older-than=12m` | yes |
-| `unsubscribe` | Parse `List-Unsubscribe` header, execute HTTPS one-click only; `mailto:`-only senders are listed under `manual_unsubscribe` and their mail is kept (the package sends no mail). If the HTTPS unsubscribe fails (since 0.4.1), the mail is kept as well and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe` | `--sender=` | yes |
+| `unsubscribe` | Parse `List-Unsubscribe` header, execute HTTPS one-click only; `mailto:`-only senders are listed under `manual_unsubscribe` and their mail is kept (the package sends no mail). If the HTTPS unsubscribe fails (since 0.4.1), the mail is kept as well, the command exits 5 with `unsubscribe_failed`, and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe`; a link the egress guard refused as unsafe comes back under `refused_unsubscribe` instead and is never offered for manual handling | `--sender=` | yes |
 | `dedupe` | Drop Message-ID duplicates, keep oldest | `--folder=` | yes |
 | `attachments` | List large messages (v1) — strip is v2 | `--size-gt=10mb` | n/a (read-only v1) |
 | `bounces` | Find bounce / auto-reply messages | `--folder=INBOX` | yes |
@@ -328,6 +328,7 @@ The CLI exits with a numeric code; structured errors include a stable `error` st
 | `no_config` | No config file and no v0.1 fallback | 5 |
 | `config_corrupt` | Existing JSON parse failure | 5 |
 | `schema_version_unsupported` | Config from a future version | 5 |
+| `unsubscribe_failed` | `unsubscribe --apply`: the HTTPS unsubscribe failed; no mail was moved (since 0.4.1) | 5 |
 
 Generic exit codes:
 

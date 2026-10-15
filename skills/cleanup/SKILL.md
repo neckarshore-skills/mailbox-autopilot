@@ -114,7 +114,7 @@ Replace `<ACCOUNT>` with the chosen alias (or omit the `--account` flag when onl
 | "Alles an Adresse X" | `mailbox-autopilot delete --account=<ACCOUNT> --recipient x@example.com --json` |
 | "Alle Newsletter ins Archiv" | `mailbox-autopilot move --account=<ACCOUNT> --to Archiv --category newsletter --json` |
 | "Alles älter als 1 Jahr archivieren" | `mailbox-autopilot archive --account=<ACCOUNT> --older-than 12m --json` |
-| "Vom Newsletter X abmelden" | `mailbox-autopilot unsubscribe --account=<ACCOUNT> --sender X --json` (HTTPS one-click only; `mailto:`-only senders come back under `manual_unsubscribe` for the user to unsubscribe by hand, their mail is kept; if the HTTPS unsubscribe fails, the mail is kept too and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe` — tell the user it failed, never that it worked) |
+| "Vom Newsletter X abmelden" | `mailbox-autopilot unsubscribe --account=<ACCOUNT> --sender X --json` (HTTPS one-click only; `mailto:`-only senders come back under `manual_unsubscribe` for the user to unsubscribe by hand, their mail is kept; if the HTTPS unsubscribe fails, the command exits 5 (`unsubscribe_failed`), the mail is kept, and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe` — tell the user it failed, never that it worked. Targets under `refused_unsubscribe` were refused as unsafe: name them as refused and never suggest opening them) |
 | "Bounces wegräumen" | `mailbox-autopilot bounces --account=<ACCOUNT> --json` |
 | "Duplikate finden" | `mailbox-autopilot dedupe --account=<ACCOUNT> --json` |
 | "Große Anhänge zeigen" | `mailbox-autopilot attachments --account=<ACCOUNT> --size-gt 10mb --json` |
@@ -128,6 +128,7 @@ Replace `<ACCOUNT>` with the chosen alias (or omit the `--account` flag when onl
 | 3 | Auth missing | Tell user to run `auth set` in a real terminal |
 | 4 | Bad arguments / account resolution (`bad_args`, `no_account_selected`, `unknown_account`, `duplicate_alias`, `duplicate_email`, `bootstrap_failed`) | Show stderr; re-check `config list --json` if needed |
 | 4 | `preview_mismatch`: the set changed since the dry-run; nothing was moved | Run the dry-run again, show the new count, ask again |
+| 5 | `unsubscribe_failed`: the HTTPS unsubscribe failed; nothing was moved | Say it failed, show `manual_unsubscribe` as the by-hand list and `refused_unsubscribe` as "refused as unsafe, do not open". Do not retry automatically |
 | 5 | Partial failure / config error (`partial_failure`, `no_config`, `config_corrupt`, `schema_version_unsupported`) | For `partial_failure`: tell the user `moved_count` moved and `not_moved_count` did not; the audit record names the moved UIDs. Do not retry automatically |
 
 ## Audit log
