@@ -173,6 +173,8 @@ A name such as "The Code" is refused. Find the sender's address in the dry-run's
 `by_sender` block, show it to the user, and pass that address.
 
 Each account also has a **persistent keep list** (since 0.5.0, `config keep add|remove|list`).
+Before the first `config keep add`, check `mailbox-autopilot --version`: below 0.5.0 the
+subcommand does not exist and an existing list is not applied.
 `delete`, `move`, `unsubscribe` and `bounces` on that account never touch mail from those
 senders, and for `delete` and `move` the list adds to any `--keep` flags. In every dry-run,
 name what the list kept: `kept_by_config` of `kept_count`, with `keep_config` as the list.

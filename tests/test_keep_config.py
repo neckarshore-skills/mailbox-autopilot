@@ -335,3 +335,17 @@ def test_bad_keep_entry_written_by_hand_stops_before_connecting(tmp_path, monkey
     assert r.exit_code == 4, r.output
     assert json.loads(r.output)["error_code"] == "bad_config"
     assert connected == []
+
+
+def test_unsubscribe_of_a_kept_sender_says_so_and_logs_no_success(keep_env, monkeypatch):
+    msgs = [_msg(1, "news@bank.example", {"List-Unsubscribe": ("<https://bank.example/u>",)})]
+    keep_env.use(_MB(msgs), keep=["@bank.example"])
+    monkeypatch.setattr(ccli, "perform_unsubscribe", lambda a: (True, "ok"))
+    r = CliRunner().invoke(cli, ["unsubscribe", "--sender", "news@bank.example", "--apply"])
+    assert r.exit_code == 0, r.output
+    assert "Performed" not in r.output
+    assert "keep list" in r.output
+    (rec,) = [json.loads(x) for x in keep_env.log.read_text().splitlines()]
+    assert rec["result"] == "kept"
+    assert rec["affected_uids"] == []
+    assert rec["args"]["keep_config"] == ["@bank.example"]

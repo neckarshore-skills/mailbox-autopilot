@@ -1046,9 +1046,13 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
     if failed:
         payload["ok"] = False
         payload["error_code"] = "unsubscribe_failed"
+    # Every matching message is from a kept sender: nothing was looked up or moved.
+    all_kept = kept_count > 0 and not uids
     if apply:
         if failed:
             result = "failed"
+        elif all_kept:
+            result = "kept"
         elif manual:
             result = "manual"
         else:
@@ -1056,7 +1060,7 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         log_action(
             subcommand="unsubscribe",
             account=account.alias,
-            args={"sender": sender},
+            args={"sender": sender, "keep_config": list(account.keep)},
             folder=folder,
             affected_uids=[] if (manual or failed) else uids,
             result=result,
@@ -1067,7 +1071,12 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         counts = f"{len(actions)} action(s) found, {len(uids)} matching messages"
         if kept_count:
             counts += f", {kept_count} kept by the keep list"
-        if apply and manual and not failed:
+        if all_kept:
+            click.echo(
+                f"Nothing done for {sender}: all {kept_count} matching messages are from "
+                "senders on the keep list"
+            )
+        elif apply and manual and not failed:
             click.echo(f"No unsubscribe performed for {sender}, all mail kept: {counts}")
         elif apply and failed:
             click.echo(
