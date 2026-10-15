@@ -177,7 +177,7 @@ def test_ordinary_addresses_are_accepted_and_stored_as_typed(addr):
 def test_an_encoded_word_is_refused_even_with_the_address_rule_switched_off(monkeypatch):
     """Second lock: the value is written as an address object, and the mail library
     refuses an encoded-word there by itself."""
-    import mailbox_cleanup.manage.compose as compose_mod
+    import mailbox_cleanup.manage.headers as compose_mod
 
     monkeypatch.setattr(compose_mod, "is_bare_address", lambda v: True)  # first lock off
     with pytest.raises(ComposeError, match="--to"):
@@ -189,7 +189,7 @@ def test_a_header_that_holds_anything_but_the_given_addresses_is_refused(monkeyp
     """Third lock, the read-back: the header is compared with the input after it is set.
     No input is known that gets this far, so the parser surprise is simulated: the address
     object silently becomes a different address."""
-    import mailbox_cleanup.manage.compose as compose_mod
+    import mailbox_cleanup.manage.headers as compose_mod
 
     real = compose_mod.Address
     monkeypatch.setattr(
@@ -206,7 +206,7 @@ def test_a_header_that_holds_anything_but_the_given_addresses_is_refused(monkeyp
 
 
 def test_a_display_name_appearing_in_the_header_is_refused(monkeypatch):
-    import mailbox_cleanup.manage.compose as compose_mod
+    import mailbox_cleanup.manage.headers as compose_mod
 
     real = compose_mod.Address
     monkeypatch.setattr(

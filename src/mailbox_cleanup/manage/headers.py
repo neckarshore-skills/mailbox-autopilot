@@ -9,11 +9,17 @@ the same two checks before a header is set.
 from __future__ import annotations
 
 import re
+from email.headerregistry import Address
+from email.message import EmailMessage
 
 # EmailMessage() (default policy) raises ValueError on a raw CR/LF in a header value; a
 # hostile Subject must still produce a draft. Control characters (C0 `\x00-\x1f`, DEL
 # `\x7f`, and C1 `\x80-\x9f` — e.g. U+0085 NEL, which some decoders treat as a line
 # break) and whitespace runs collapse to a single space before a header is set.
+# To and Cc together, for a new mail and for a reply. A mail that deceived the agent into
+# addressing a crowd is stopped here, not by a human counting recipients in a draft.
+MAX_RECIPIENTS = 10
+
 _CONTROL_OR_WS_RUN_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]+|\s+")
 
 # One bare address, by allowlist. Local part: RFC 5322 atoms joined by single dots. Domain:
@@ -38,3 +44,23 @@ def is_bare_address(value: str) -> bool:
 
 def clean_header_value(value: str) -> str:
     return _CONTROL_OR_WS_RUN_RE.sub(" ", value).strip()
+
+
+class AddressHeaderError(ValueError):
+    """The header did not store exactly the given bare addresses."""
+
+
+def set_addresses(msg: EmailMessage, header: str, addrs: list[str]) -> None:
+    """Write `addrs` as address objects, then read the header back and compare.
+
+    Address objects, not a joined string: a string is parsed again by the mail library,
+    and that second parse is where one accepted value turned into two recipients. The
+    read-back is the second lock: whatever the header holds must be exactly the input,
+    one address each and no display name, or AddressHeaderError is raised."""
+    try:
+        msg[header] = [Address(addr_spec=a) for a in addrs]
+        stored = [(a.addr_spec, a.display_name) for a in msg[header].addresses]
+    except Exception as e:  # the parser raises several unrelated types on odd input
+        raise AddressHeaderError(header) from e
+    if stored != [(a, "") for a in addrs]:
+        raise AddressHeaderError(header)
