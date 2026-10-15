@@ -262,7 +262,9 @@ def _body(tmp_path):
 
 
 def test_preview_writes_nothing_and_needs_no_text(audit, mail):
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "1", "--preview", "--json"])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--no-quote", "--uid", "1", "--preview", "--json"]
+    )
     assert res.exit_code == 0, res.output
     out = json.loads(res.output)
     assert out["preview"] is True
@@ -276,7 +278,8 @@ def test_preview_writes_nothing_and_needs_no_text(audit, mail):
 
 def test_write_reports_the_recipients_read_back_from_the_draft(audit, mail, tmp_path):
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "1", "--body-file", _body(tmp_path), "--json"]
+        cli,
+        ["manage", "draft", "--no-quote", "--uid", "1", "--body-file", _body(tmp_path), "--json"],
     )
     assert res.exit_code == 0, res.output
     out = json.loads(res.output)
@@ -291,7 +294,7 @@ def test_write_without_text_is_refused_before_any_imap_call(audit, monkeypatch):
         raise AssertionError("mailbox contacted")
 
     monkeypatch.setattr(mcli, "imap_connect", _no_connect)
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "1", "--json"])
+    res = CliRunner().invoke(cli, ["manage", "draft", "--no-quote", "--uid", "1", "--json"])
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "bad_args"
 
@@ -300,7 +303,7 @@ def test_sender_only_and_drop_reach_the_draft(audit, mail, tmp_path):
     res = CliRunner().invoke(
         cli,
         [
-            "manage", "draft", "--uid", "1", "--drop", "cara@example.net",
+            "manage", "draft", "--no-quote", "--uid", "1", "--drop", "cara@example.net",
             "--body-file", _body(tmp_path), "--json",
         ],
     )  # fmt: skip
@@ -311,6 +314,7 @@ def test_sender_only_and_drop_reach_the_draft(audit, mail, tmp_path):
         [
             "manage",
             "draft",
+            "--no-quote",
             "--uid",
             "1",
             "--sender-only",
@@ -322,8 +326,8 @@ def test_sender_only_and_drop_reach_the_draft(audit, mail, tmp_path):
     assert res.exit_code == 0, res.output
     assert json.loads(res.output)["to"] == [wrap("mira@example.org")]
     recs = _records(audit)
-    assert recs[0]["arg_keys"] == ["body_file", "drop", "uid"]
-    assert recs[1]["arg_keys"] == ["body_file", "sender_only", "uid"]
+    assert recs[0]["arg_keys"] == ["body_file", "drop", "no_quote", "uid"]
+    assert recs[1]["arg_keys"] == ["body_file", "no_quote", "sender_only", "uid"]
     assert "cara@example.net" not in audit.read_text(encoding="utf-8")
 
 
@@ -331,7 +335,7 @@ def test_drop_of_a_foreign_address_is_refused_and_writes_nothing(audit, mail, tm
     res = CliRunner().invoke(
         cli,
         [
-            "manage", "draft", "--uid", "1", "--drop", "evil@example.net",
+            "manage", "draft", "--no-quote", "--uid", "1", "--drop", "evil@example.net",
             "--body-file", _body(tmp_path), "--json",
         ],
     )  # fmt: skip
@@ -351,7 +355,8 @@ def test_too_many_recipients_is_refused_and_writes_nothing(audit, monkeypatch, t
     monkeypatch.setattr(mcli, "read_message", lambda mb, *, uid, folder: _orig(to=(ME, *many)))
     monkeypatch.setattr(mcli, "save_draft", lambda mb, msg: saved.append(msg) or "Drafts")
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "1", "--body-file", _body(tmp_path), "--json"]
+        cli,
+        ["manage", "draft", "--no-quote", "--uid", "1", "--body-file", _body(tmp_path), "--json"],
     )
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "too_many_recipients"
@@ -362,7 +367,7 @@ def test_drop_that_is_not_an_address_is_a_control_char_safe_refusal(audit, mail,
     res = CliRunner().invoke(
         cli,
         [
-            "manage", "draft", "--uid", "1", "--drop", "a@b\r\nBcc: x@y",
+            "manage", "draft", "--no-quote", "--uid", "1", "--drop", "a@b\r\nBcc: x@y",
             "--body-file", _body(tmp_path), "--json",
         ],
     )  # fmt: skip
@@ -397,13 +402,26 @@ def test_preview_of_an_over_long_list_shows_it_so_drop_has_something_to_pick(aud
     many = tuple(f"p{i}@example.org" for i in range(MAX_RECIPIENTS))
     monkeypatch.setattr(mcli, "imap_connect", _fake_connect)
     monkeypatch.setattr(mcli, "read_message", lambda mb, *, uid, folder: _orig(to=(ME, *many)))
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "1", "--preview", "--json"])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--no-quote", "--uid", "1", "--preview", "--json"]
+    )
     assert res.exit_code == 0, res.output
     out = json.loads(res.output)
     assert len(out["to"]) == MAX_RECIPIENTS + 1
     assert out["over_limit"] is True
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "1", "--preview", "--drop", "p0@example.org", "--json"]
+        cli,
+        [
+            "manage",
+            "draft",
+            "--no-quote",
+            "--uid",
+            "1",
+            "--preview",
+            "--drop",
+            "p0@example.org",
+            "--json",
+        ],
     )
     assert json.loads(res.output)["over_limit"] is False
 
@@ -412,8 +430,8 @@ def test_cli_refuses_an_emptied_list_and_writes_nothing(audit, mail, tmp_path):
     res = CliRunner().invoke(
         cli,
         [
-            "manage", "draft", "--uid", "1", "--sender-only", "--drop", "mira@example.org",
-            "--body-file", _body(tmp_path), "--json",
+            "manage", "draft", "--no-quote", "--uid", "1", "--sender-only",
+            "--drop", "mira@example.org", "--body-file", _body(tmp_path), "--json",
         ],
     )  # fmt: skip
     assert res.exit_code == 4, res.output

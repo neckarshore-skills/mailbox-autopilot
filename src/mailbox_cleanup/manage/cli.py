@@ -26,7 +26,14 @@ from .attachments import (
     write_exclusive,
 )
 from .compose import ComposeError, build_new
-from .draft import NoDraftsFolderError, RecipientError, build_reply, plan_recipients, save_draft
+from .draft import (
+    QUOTE_LANGS,
+    NoDraftsFolderError,
+    RecipientError,
+    build_reply,
+    plan_recipients,
+    save_draft,
+)
 from .envelope import wrap
 from .headers import is_bare_address
 from .ids import safe_message_id
@@ -408,12 +415,29 @@ def outbox_cmd(json_mode):
 )
 @click.option("--sender-only", is_flag=True, help="Answer the sender only, not everyone.")
 @click.option(
+    "--quote-lang",
+    default=None,
+    help="Quote the answered mail below the reply; de or en, the language of the reply.",
+)
+@click.option("--no-quote", is_flag=True, help="Write the reply without the answered mail.")
+@click.option(
     "--drop",
     multiple=True,
     help="Leave one planned recipient out; repeat for more. Cannot add anyone.",
 )
 @click.option("--json", "json_mode", is_flag=True, help="Accepted for symmetry; output is JSON.")
-def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, json_mode):
+def draft_cmd(
+    account_flag,
+    folder,
+    uid,
+    body_file,
+    preview,
+    sender_only,
+    quote_lang,
+    no_quote,
+    drop,
+    json_mode,
+):
     """Put a reply into the Drafts folder. Answers everyone by default. Never sends."""
     account, creds = _resolve(account_flag)
     arg_keys = ["uid"] + (["body_file"] if body_file is not None else [])
@@ -422,7 +446,13 @@ def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, 
     ctx = click.get_current_context()
     if ctx.get_parameter_source("folder") == ParameterSource.COMMANDLINE:
         arg_keys.append("folder")
-    arg_keys += _arg_keys(preview=preview, sender_only=sender_only, drop=drop)
+    arg_keys += _arg_keys(
+        preview=preview,
+        sender_only=sender_only,
+        quote_lang=quote_lang,
+        no_quote=no_quote,
+        drop=drop,
+    )
     fail = dict(subcommand="manage.draft", account=account, folder=folder, arg_keys=arg_keys)
     _reject_control_chars(fail, folder=folder)
     if not _UID_RE.fullmatch(uid):
@@ -434,6 +464,23 @@ def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, 
             **fail,
             code="bad_args",
             message="--drop takes one bare ASCII address per use (name@example.org)",
+            exit_code=4,
+        )
+    if quote_lang is not None and quote_lang not in QUOTE_LANGS:
+        _fail_audited(**fail, code="bad_args", message="--quote-lang takes de or en", exit_code=4)
+    if quote_lang is not None and no_quote:
+        _fail_audited(
+            **fail,
+            code="bad_args",
+            message="--quote-lang and --no-quote exclude each other",
+            exit_code=4,
+        )
+    if not preview and quote_lang is None and not no_quote:
+        # No default language: a guessed one is the mistake the Founder ruled out.
+        _fail_audited(
+            **fail,
+            code="bad_args",
+            message="a reply needs --quote-lang de|en (the language of the reply) or --no-quote",
             exit_code=4,
         )
     body = None
@@ -472,7 +519,11 @@ def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, 
                     refused = e
                 else:
                     msg, warnings = build_reply(
-                        orig, from_addr=account.email, body=body or "", recipients=plan
+                        orig,
+                        from_addr=account.email,
+                        body=body or "",
+                        recipients=plan,
+                        quote_lang=None if preview else quote_lang,
                     )
                     if not preview:
                         drafts = save_draft(mb, msg)
