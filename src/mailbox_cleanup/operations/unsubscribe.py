@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import requests
 
 from .filters import build_imap_search
+from .selection import _is_kept, parse_keep
 
 _LINK_RE = re.compile(r"<([^>]+)>")
 
@@ -135,8 +136,13 @@ def perform_unsubscribe(action: UnsubAction, *, timeout: float = 15.0) -> tuple[
     return False, f"Unknown action kind: {action.kind}"
 
 
-def collect_unsub_targets(mb, *, sender: str, folder: str = "INBOX") -> dict:
-    """Find messages from sender, parse their List-Unsubscribe headers, return targets."""
+def collect_unsub_targets(mb, *, sender: str, folder: str = "INBOX", keep=()) -> dict:
+    """Find messages from sender, parse their List-Unsubscribe headers, return targets.
+
+    Messages from a kept sender are left out entirely: neither their UIDs (which
+    would go to Trash) nor their unsubscribe targets are returned.
+    """
+    addrs, domains = parse_keep(keep)
     mb.folder.set(folder)
     msgs = list(
         mb.fetch(
@@ -149,7 +155,11 @@ def collect_unsub_targets(mb, *, sender: str, folder: str = "INBOX") -> dict:
     seen: set[tuple[str, str]] = set()
     out: list[dict] = []
     uids: list[str] = []
+    kept = 0
     for m in msgs:
+        if _is_kept(m.from_, addrs, domains):
+            kept += 1
+            continue
         if m.uid:
             uids.append(m.uid)
         headers = m.headers or {}
@@ -174,4 +184,4 @@ def collect_unsub_targets(mb, *, sender: str, folder: str = "INBOX") -> dict:
                     "one_click": action.one_click,
                 }
             )
-    return {"uids": uids, "actions": out}
+    return {"uids": uids, "actions": out, "kept_count": kept}

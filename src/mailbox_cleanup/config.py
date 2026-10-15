@@ -57,6 +57,30 @@ def derive_alias_from_email(email: str) -> str:
 SCHEMA_VERSION = 1
 
 
+def normalize_keep(entries) -> tuple[str, ...]:
+    """Validate keep entries and return them lowercased, de-duplicated, in order.
+
+    An entry is a full address (name@example.com) or a domain (@example.com).
+    Anything else is refused: a bare word such as a newsletter's name would have
+    to be matched as a substring, and nobody can predict what that keeps.
+    Raises ValueError naming the first bad entry.
+    """
+    out: list[str] = []
+    for raw in entries:
+        e = (raw or "").strip().lower() if isinstance(raw, str) else None
+        if e is None:
+            raise ValueError(f"keep entry {raw!r} must be a string")
+        _local, at, domain = e.partition("@")
+        if not at or not domain or "@" in domain or "." not in domain:
+            raise ValueError(
+                f"keep entry {raw!r} must be a full address (name@example.com) "
+                "or a domain (@example.com)"
+            )
+        if e not in out:
+            out.append(e)
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class Account:
     alias: str
@@ -64,6 +88,8 @@ class Account:
     server: str
     port: int = 993
     provider: str = ""
+    # Senders never acted on in this account (Founder decision 2026-10-13/-15).
+    keep: tuple[str, ...] = ()
 
     def __post_init__(self):
         # frozen dataclass: must use object.__setattr__ for derived defaults
@@ -91,12 +117,20 @@ def _validate_account_dict(d: dict) -> Account:
     email = d["email"]
     if not isinstance(email, str) or "@" not in email:
         raise ConfigError(f"Invalid email {email!r} for alias {alias!r}")
+    keep_raw = d.get("keep", [])
+    if not isinstance(keep_raw, list):
+        raise ConfigError(f"'keep' of alias {alias!r} must be a list, got {keep_raw!r}")
+    try:
+        keep = normalize_keep(keep_raw)
+    except ValueError as e:
+        raise ConfigError(f"Invalid keep list of alias {alias!r}: {e}") from e
     return Account(
         alias=alias,
         email=email,
         server=d["server"],
         port=int(d.get("port", 993)),
         provider=d.get("provider", ""),
+        keep=keep,
     )
 
 
@@ -143,7 +177,7 @@ def _to_dict(cfg: Config) -> dict:
     return {
         "schema_version": cfg.schema_version,
         "default": cfg.default,
-        "accounts": [asdict(a) for a in cfg.accounts],
+        "accounts": [{**asdict(a), "keep": list(a.keep)} for a in cfg.accounts],
     }
 
 

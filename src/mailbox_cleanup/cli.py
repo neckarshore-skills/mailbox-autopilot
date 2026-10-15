@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from collections import Counter
 from dataclasses import asdict
@@ -16,12 +17,15 @@ from .auth import (
 from .cli_helpers import AccountFlagsError, resolve_account_and_credentials
 from .config import (
     Account,
+    AccountResolutionError,
     Config,
     ConfigError,
     bootstrap_from_v01_keychain,
     config_path,
     derive_alias_from_email,
     load_config,
+    normalize_keep,
+    resolve_account,
     save_config,
 )
 from .folders import resolve_folder
@@ -378,6 +382,100 @@ def config_remove(alias: str):
     click.echo(f"Removed account {alias} ({target.email}).")
 
 
+@config_group.group("keep")
+def config_keep_group():
+    """Senders never acted on in one account: full address or @domain.
+
+    delete, move, unsubscribe and bounces leave mail from these senders alone.
+    """
+
+
+def _keep_target(account_flag, json_mode):
+    """Load the config and resolve the account the keep command works on."""
+    try:
+        cfg = load_config()
+    except FileNotFoundError:
+        _fail({"error_code": "no_config", "message": f"No config at {config_path()}"}, 5, json_mode)
+    except ConfigError as e:
+        _fail({"error_code": "bad_config", "message": str(e)}, 4, json_mode)
+    try:
+        account = resolve_account(
+            cfg, flag=account_flag, env=os.environ.get("MAILBOX_CLEANUP_ACCOUNT")
+        )
+    except AccountResolutionError as e:
+        _fail({"error_code": e.error_code, "message": str(e)}, 4, json_mode)
+    return cfg, account
+
+
+def _save_keep(cfg, account, keep):
+    accounts = tuple(
+        dc_replace(a, keep=keep) if a.alias == account.alias else a for a in cfg.accounts
+    )
+    save_config(dc_replace(cfg, accounts=accounts))
+
+
+def _keep_payload(alias, keep):
+    return {"account": alias, "keep": list(keep)}
+
+
+@config_keep_group.command("add")
+@click.option("--account", "account_flag", default=None, help="Alias or email.")
+@click.argument("entries", nargs=-1, required=True, callback=_no_control)
+@click.option("--json", "json_mode", is_flag=True)
+def config_keep_add(account_flag, entries, json_mode):
+    """Add senders to the keep list of one account."""
+    cfg, account = _keep_target(account_flag, json_mode)
+    try:
+        new = normalize_keep([*account.keep, *entries])
+    except ValueError as e:
+        _fail({"error_code": "bad_args", "message": str(e)}, 4, json_mode)
+    _save_keep(cfg, account, new)
+    if json_mode:
+        click.echo(json.dumps(_keep_payload(account.alias, new), ensure_ascii=False, indent=2))
+    else:
+        click.echo(f"Keep list of {account.alias}: {', '.join(new)}")
+
+
+@config_keep_group.command("remove")
+@click.option("--account", "account_flag", default=None, help="Alias or email.")
+@click.argument("entries", nargs=-1, required=True, callback=_no_control)
+@click.option("--json", "json_mode", is_flag=True)
+def config_keep_remove(account_flag, entries, json_mode):
+    """Remove senders from the keep list of one account."""
+    cfg, account = _keep_target(account_flag, json_mode)
+    drop = {(e or "").strip().lower() for e in entries}
+    absent = sorted(drop - set(account.keep))
+    if absent:
+        _fail(
+            {
+                "error_code": "not_in_keep_list",
+                "message": f"Not on the keep list of {account.alias}: {', '.join(absent)}",
+            },
+            4,
+            json_mode,
+        )
+    new = tuple(e for e in account.keep if e not in drop)
+    _save_keep(cfg, account, new)
+    if json_mode:
+        click.echo(json.dumps(_keep_payload(account.alias, new), ensure_ascii=False, indent=2))
+    else:
+        click.echo(f"Keep list of {account.alias}: {', '.join(new) or '(empty)'}")
+
+
+@config_keep_group.command("list")
+@click.option("--account", "account_flag", default=None, help="Alias or email.")
+@click.option("--json", "json_mode", is_flag=True)
+def config_keep_list(account_flag, json_mode):
+    """Show the keep list of one account."""
+    _cfg, account = _keep_target(account_flag, json_mode)
+    if json_mode:
+        click.echo(
+            json.dumps(_keep_payload(account.alias, account.keep), ensure_ascii=False, indent=2)
+        )
+    else:
+        click.echo(f"Keep list of {account.alias}: {', '.join(account.keep) or '(empty)'}")
+
+
 @cli.command("scan")
 @click.option("--account", "account_flag", default=None, help="Alias or email.")
 @click.option("--email", "email_flag", default=None, help="Deprecated; use --account.")
@@ -513,6 +611,8 @@ def _selection_args(sender, subject_contains, older_than, recipient, category, k
 
 def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args, run, text_target):
     """Shared body of delete and move: run, map errors to exit codes, audit, emit."""
+    # The audit log has to explain why a mail survived: record the account's list too.
+    args = {**args, "keep_config": list(account[0].keep)}
     try:
         with imap_connect(account[1], port=account[0].port) as mb:
             res = run(mb)
@@ -565,6 +665,8 @@ def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args
         "affected_count": len(res.affected_uids),
         "affected_uids": res.affected_uids,
         "kept_count": res.kept_count,
+        "kept_by_config": res.kept_by_config,
+        "keep_config": list(account[0].keep),
         "by_sender": res.by_sender,
         "sample": res.sample,
     }
@@ -643,6 +745,7 @@ def delete_cmd(
             recipient=recipient,
             category=category,
             keep=keep,
+            config_keep=resolved[0].keep,
             apply=apply,
             limit=limit,
             expect_count=expect_count,
@@ -698,6 +801,7 @@ def move_cmd(
             recipient=recipient,
             category=category,
             keep=keep,
+            config_keep=resolved[0].keep,
             apply=apply,
             limit=limit,
             expect_count=expect_count,
@@ -889,12 +993,14 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
     results: list[dict] = []
     manual: list[str] = []
     refused: list[str] = []
+    kept_count = 0
     failed = False
     try:
         with imap_connect(creds, port=account.port) as mb:
-            data = collect_unsub_targets(mb, sender=sender, folder=folder)
+            data = collect_unsub_targets(mb, sender=sender, folder=folder, keep=account.keep)
             uids = data["uids"]
             actions = data["actions"]
+            kept_count = data.get("kept_count", 0)
             https_actions = [a for a in actions if a["kind"] == "https"]
             if not https_actions:
                 manual = [a["target"] for a in actions if a["kind"] == "mailto"]
@@ -931,6 +1037,7 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         "folder": folder,
         "sender": sender,
         "matching_count": len(uids),
+        "kept_count": kept_count,
         "actions": actions,
         "results": results,
         "manual_unsubscribe": manual,
@@ -958,6 +1065,8 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         counts = f"{len(actions)} action(s) found, {len(uids)} matching messages"
+        if kept_count:
+            counts += f", {kept_count} kept by the keep list"
         if apply and manual and not failed:
             click.echo(f"No unsubscribe performed for {sender}, all mail kept: {counts}")
         elif apply and failed:
@@ -998,7 +1107,7 @@ def bounces_cmd(account_flag, email_flag, folder, apply, json_mode):
         return
     try:
         with imap_connect(creds, port=account.port) as mb:
-            res = run_bounces(mb, folder=folder, apply=apply)
+            res = run_bounces(mb, folder=folder, apply=apply, keep=account.keep)
     except Exception as e:
         _fail({"error_code": "operation_error", "message": str(e)}, 2, json_mode)
         return
@@ -1011,13 +1120,14 @@ def bounces_cmd(account_flag, email_flag, folder, apply, json_mode):
         "target_folder": res.target_folder,
         "affected_count": len(res.affected_uids),
         "affected_uids": res.affected_uids,
+        "kept_count": res.kept_count,
         "sample": res.sample,
     }
     if apply:
         log_action(
             subcommand="bounces",
             account=account.alias,
-            args={},
+            args={"keep_config": list(account.keep)},
             folder=folder,
             affected_uids=res.affected_uids,
             result="success",

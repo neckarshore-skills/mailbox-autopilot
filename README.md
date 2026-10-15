@@ -229,6 +229,7 @@ If only one account is configured, `--account` can be omitted.
 | `config rename` | Rename an alias | `<old>`, `<new>` | n/a |
 | `config set-default` | Mark an account as default | `<alias>` | n/a |
 | `config remove` | Delete account from config + remove Keychain password | `<alias>` | n/a |
+| `config keep add` / `remove` / `list` | Keep list of one account: senders that `delete`, `move`, `unsubscribe` and `bounces` never touch (since 0.5.0) | entries (address or `@domain`); optional `--account=` | n/a |
 | `scan` | Discovery — classify INBOX, return JSON report | `--folder=INBOX` (default) | n/a (read-only) |
 | `senders` | List top-N senders by count | `--top=50` | n/a (read-only) |
 | `delete` | Soft-delete (move to Trash) by filter | one of `--sender=` (repeatable) / `--subject-contains=` / `--older-than=` / `--recipient=` / `--category=`; optional `--keep=` (repeatable), `--expect-count=` | yes |
@@ -248,6 +249,8 @@ If only one account is configured, `--account` can be omitted.
 **Categories (`--category`):** `newsletter`, `automated`, `bounce` — the same classifier `scan` uses, applied to the fetched headers. `--limit` counts after the category and keep-list filters.
 
 **Keep-list (`--keep`):** a full address, or a domain written `@example.com` (its subdomains are kept too). Bare words are refused: a substring match on a name would keep things nobody can predict.
+
+**Persistent keep list (since 0.5.0):** each account can carry its own keep list in `config.json`, maintained with `config keep add|remove|list [--account=<alias>]`. `delete`, `move`, `unsubscribe` and `bounces` on that account leave mail from those senders alone; for `delete` and `move` the list adds to any `--keep` flags. The dry-run shows `kept_by_config` (how many of `kept_count` the account's list kept) and `keep_config` (the list itself), and the audit log records it under `args.keep_config`. `dedupe` always keeps one copy and `archive` only moves within the mailbox, so neither consults the list. An entry that is neither an address nor `@domain` makes every command stop before connecting with `bad_config` (exit 4). A CLI older than 0.5.0 ignores the field when reading and drops it when one of its `config` or `auth set` commands rewrites the file, so update the CLI before adding entries.
 
 **Preview binding (`--expect-count`):** with `--apply`, pass the `affected_count` the dry-run showed. If the matching set changed size in between, nothing moves and the CLI exits 4 with `preview_mismatch`.
 
@@ -329,6 +332,8 @@ The CLI exits with a numeric code; structured errors include a stable `error` st
 | `config_corrupt` | Existing JSON parse failure | 5 |
 | `schema_version_unsupported` | Config from a future version | 5 |
 | `unsubscribe_failed` | `unsubscribe --apply`: the HTTPS unsubscribe failed; no mail was moved (since 0.4.1) | 5 |
+| `bad_config` | The config file cannot be used (for example a keep entry that is neither an address nor `@domain`); nothing connects (since 0.5.0) | 4 |
+| `not_in_keep_list` | `config keep remove`: the entry is not on that account's list; nothing changed (since 0.5.0) | 4 |
 
 Generic exit codes:
 

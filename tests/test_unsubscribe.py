@@ -192,7 +192,7 @@ def _run_apply(monkeypatch, actions, flags=("--apply", "--json"), exit_code=0):
     monkeypatch.setattr(
         cli_mod,
         "collect_unsub_targets",
-        lambda mb, sender, folder: {"uids": ["7"], "actions": actions},
+        lambda mb, sender, folder, keep=(): {"uids": ["7"], "actions": actions},
     )
     monkeypatch.setattr(cli_mod, "resolve_folder", lambda mb, kind: "Trash")
     monkeypatch.setattr(cli_mod, "log_action", lambda **kw: audit.append(kw))
