@@ -37,6 +37,7 @@ from .operations.delete import PreviewMismatchError, run_delete
 from .operations.move import run_move
 from .operations.selection import CATEGORIES
 from .operations.unsubscribe import (
+    EGRESS_REFUSED_PREFIX,
     UnsubAction,
     collect_unsub_targets,
     perform_unsubscribe,
@@ -868,6 +869,10 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
     """Parse List-Unsubscribe for sender; optionally run HTTPS one-click.
 
     mailto-only senders are listed under manual_unsubscribe and their mail is kept.
+    A failed HTTPS unsubscribe keeps the mail too, reports ok=false and exits 5
+    (unsubscribe_failed): the failed link and any mailto alternative are listed
+    under manual_unsubscribe. A link the egress guard refused is never listed for
+    manual handling; it goes to refused_unsubscribe instead.
     """
     try:
         account, creds = resolve_account_and_credentials(
@@ -883,6 +888,8 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
     actions: list[dict] = []
     results: list[dict] = []
     manual: list[str] = []
+    refused: list[str] = []
+    failed = False
     try:
         with imap_connect(creds, port=account.port) as mb:
             data = collect_unsub_targets(mb, sender=sender, folder=folder)
@@ -897,8 +904,19 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
                     a = UnsubAction(**{k: first[k] for k in ("kind", "target", "one_click")})
                     ok, info = perform_unsubscribe(a)
                     results.append({"action": first, "ok": ok, "info": info})
-                # (b) and (c): move to Trash as before. (a) mailto-only: keep the mail.
-                if not manual:
+                    if not ok:
+                        # Founder 2026-10-08: a failed unsubscribe keeps the mail and
+                        # lists the target for manual handling.
+                        failed = True
+                        mailto = [a["target"] for a in actions if a["kind"] == "mailto"]
+                        if info.startswith(EGRESS_REFUSED_PREFIX):
+                            # Never hand a person a link the tool refused as unsafe.
+                            refused = [first["target"]]
+                            manual = mailto
+                        else:
+                            manual = [first["target"], *mailto]
+                # HTTPS success or no header: move to Trash. mailto-only or failed: keep.
+                if not manual and not failed:
                     trash = resolve_folder(mb, "trash")
                     if trash and uids:
                         move_in_batches(mb, uids, trash)
@@ -916,37 +934,48 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
         "actions": actions,
         "results": results,
         "manual_unsubscribe": manual,
+        "refused_unsubscribe": refused,
     }
+    if failed:
+        payload["ok"] = False
+        payload["error_code"] = "unsubscribe_failed"
     if apply:
-        if manual:
+        if failed:
+            result = "failed"
+        elif manual:
             result = "manual"
-        elif not results or results[0]["ok"]:
-            result = "success"
         else:
-            result = "partial"
+            result = "success"
         log_action(
             subcommand="unsubscribe",
             account=account.alias,
             args={"sender": sender},
             folder=folder,
-            affected_uids=[] if manual else uids,
+            affected_uids=[] if (manual or failed) else uids,
             result=result,
         )
     if json_mode:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         counts = f"{len(actions)} action(s) found, {len(uids)} matching messages"
-        if apply and manual:
+        if apply and manual and not failed:
             click.echo(f"No unsubscribe performed for {sender}, all mail kept: {counts}")
-        elif apply and results and not results[0]["ok"]:
-            click.echo(f"Unsubscribe FAILED for {sender} ({results[0]['info']}): {counts}")
+        elif apply and failed:
+            click.echo(
+                f"Unsubscribe FAILED for {sender} ({results[0]['info']}), all mail kept: {counts}"
+            )
         elif manual:
             click.echo(f"No automatic unsubscribe available for {sender}: {counts}")
         else:
             verb = "Performed" if apply else "Would attempt"
             click.echo(f"{verb} unsubscribe for {sender}: {counts}")
         if manual:
-            click.echo(f"Unsubscribe by hand (mailto only): {', '.join(manual)}")
+            label = "Unsubscribe by hand" if failed else "Unsubscribe by hand (mailto only)"
+            click.echo(f"{label}: {', '.join(manual)}")
+        if refused:
+            click.echo(f"Refused as unsafe, do not open: {', '.join(refused)}")
+    if failed:
+        sys.exit(5)
 
 
 @cli.command("bounces")

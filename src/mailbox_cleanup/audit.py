@@ -33,7 +33,8 @@ def log_action(
     """Append one JSON-line record describing an applied action.
 
     `account` is the alias of the account the action was performed against.
-    `result` is always a string ("success", "partial_failure", "error"); readers
+    `result` is always a string ("success", "partial_failure", "error", and for
+    `unsubscribe` also "manual" and "failed"); readers
     compare it as one, so a structured value would read as an unknown outcome (#51).
     """
     _require_str_result(result)

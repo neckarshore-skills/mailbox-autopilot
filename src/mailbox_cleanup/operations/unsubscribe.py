@@ -71,6 +71,10 @@ def validate_egress_url(url: str) -> None:
             raise EgressBlocked(f"host {host!r} resolves to non-routable address {ip}")
 
 
+# perform_unsubscribe's info string for a target the egress guard refused.
+EGRESS_REFUSED_PREFIX = "blocked by egress guard:"
+
+
 @dataclass
 class UnsubAction:
     kind: str  # "https" or "mailto"
@@ -109,7 +113,7 @@ def perform_unsubscribe(action: UnsubAction, *, timeout: float = 15.0) -> tuple[
         try:
             validate_egress_url(action.target)
         except EgressBlocked as e:
-            return False, f"blocked by egress guard: {e}"
+            return False, f"{EGRESS_REFUSED_PREFIX} {e}"
         try:
             # allow_redirects=False closes the redirect-to-internal bypass:
             # a permitted public host cannot 30x us onto 169.254.169.254 etc.

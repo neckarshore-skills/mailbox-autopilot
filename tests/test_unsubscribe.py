@@ -167,7 +167,7 @@ def test_perform_https_disables_redirects():
 # --- CLI `unsubscribe --apply` (Review Focus 1) -----------------------------
 
 
-def _run_apply(monkeypatch, actions, flags=("--apply", "--json")):
+def _run_apply(monkeypatch, actions, flags=("--apply", "--json"), exit_code=0):
     """Run `unsubscribe --apply` against a fake mailbox; return (payload, moves, audit)."""
     moved = []
     audit = []
@@ -197,7 +197,7 @@ def _run_apply(monkeypatch, actions, flags=("--apply", "--json")):
     monkeypatch.setattr(cli_mod, "resolve_folder", lambda mb, kind: "Trash")
     monkeypatch.setattr(cli_mod, "log_action", lambda **kw: audit.append(kw))
     res = CliRunner().invoke(cli_mod.cli, ["unsubscribe", "--sender", "news@example.com", *flags])
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == exit_code, res.output
     if "--json" not in flags:
         return res.output, moved, audit
     return json.loads(res.output), moved, audit
@@ -232,6 +232,86 @@ def test_apply_without_list_unsubscribe_header_still_trashes(monkeypatch):
     assert payload["manual_unsubscribe"] == []
     assert moved == [(("7",), "Trash")]
     assert [a["result"] for a in audit] == ["success"]
+
+
+HTTPS_ONLY = [{"kind": "https", "target": "https://example.com/u", "one_click": True}]
+
+
+def test_apply_https_failure_keeps_mail_and_lists_target(monkeypatch):
+    # Founder 2026-10-08 18:02 CEST, "Behalten und auflisten":
+    # a failed HTTPS unsubscribe must not look like a successful one.
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 500"))
+    payload, moved, audit = _run_apply(monkeypatch, HTTPS_ONLY, exit_code=5)
+    assert moved == []
+    # A failed attempt is a failure for any caller that checks status (CodeRabbit on #68).
+    assert payload["ok"] is False
+    assert payload["error_code"] == "unsubscribe_failed"
+    assert payload["manual_unsubscribe"] == ["https://example.com/u"]
+    assert payload["refused_unsubscribe"] == []
+    assert [(a["result"], a["affected_uids"]) for a in audit] == [("failed", [])]
+
+
+def test_apply_https_failure_also_lists_mailto_alternative(monkeypatch):
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 404"))
+    payload, moved, _ = _run_apply(
+        monkeypatch,
+        [*HTTPS_ONLY, {"kind": "mailto", "target": "unsub@example.com", "one_click": False}],
+        exit_code=5,
+    )
+    assert moved == []
+    assert payload["manual_unsubscribe"] == ["https://example.com/u", "unsub@example.com"]
+
+
+def test_apply_refused_link_is_never_offered_for_manual_handling(monkeypatch):
+    # A link the egress guard refused (private range, loopback, metadata IP, rebind)
+    # must not be handed to a person to open: it is listed apart, and the mail is kept.
+    monkeypatch.setattr(
+        cli_mod,
+        "perform_unsubscribe",
+        lambda a: (False, "blocked by egress guard: host '10.0.0.1' resolves to x"),
+    )
+    actions = [
+        {"kind": "https", "target": "https://10.0.0.1/u", "one_click": True},
+        {"kind": "mailto", "target": "unsub@example.com", "one_click": False},
+    ]
+    payload, moved, audit = _run_apply(monkeypatch, actions, exit_code=5)
+    assert moved == []
+    assert payload["manual_unsubscribe"] == ["unsub@example.com"]
+    assert payload["refused_unsubscribe"] == ["https://10.0.0.1/u"]
+    assert [(a["result"], a["affected_uids"]) for a in audit] == [("failed", [])]
+
+
+def test_apply_refused_link_text_output_warns_not_to_open(monkeypatch):
+    monkeypatch.setattr(
+        cli_mod, "perform_unsubscribe", lambda a: (False, "blocked by egress guard: x")
+    )
+    out, moved, _ = _run_apply(
+        monkeypatch,
+        [{"kind": "https", "target": "https://10.0.0.1/u", "one_click": True}],
+        flags=("--apply",),
+        exit_code=5,
+    )
+    assert moved == []
+    by_hand = [ln for ln in out.splitlines() if ln.startswith("Unsubscribe by hand")]
+    assert by_hand == []
+    assert "do not open" in out and "https://10.0.0.1/u" in out
+
+
+def test_apply_https_failure_text_output_says_mail_kept(monkeypatch):
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 500"))
+    out, moved, _ = _run_apply(monkeypatch, HTTPS_ONLY, flags=("--apply",), exit_code=5)
+    assert moved == []
+    assert "FAILED" in out
+    assert "all mail kept" in out
+    assert "https://example.com/u" in out
+
+
+def test_dry_run_https_lists_nothing_manual(monkeypatch):
+    # A dry run has not failed anything yet; the manual list stays empty.
+    payload, moved, audit = _run_apply(monkeypatch, HTTPS_ONLY, flags=("--json",))
+    assert payload["ok"] is True
+    assert payload["manual_unsubscribe"] == []
+    assert moved == [] and audit == []
 
 
 MAILTO_ONLY = [{"kind": "mailto", "target": "unsub@example.com", "one_click": False}]
@@ -269,14 +349,17 @@ def test_parse_scheme_is_case_insensitive(header, kind):
 
 def test_apply_failed_https_text_output_reports_failure(monkeypatch):
     monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: (False, "HTTP 500"))
-    out, _, audit = _run_apply(
+    out, moved, audit = _run_apply(
         monkeypatch,
         [{"kind": "https", "target": "https://example.com/u", "one_click": True}],
         flags=("--apply",),
+        exit_code=5,
     )
     assert "Performed" not in out
     assert "FAILED" in out and "HTTP 500" in out
-    assert [a["result"] for a in audit] == ["partial"]
+    # Founder 2026-10-08: the mail is kept, so the record is "failed", not "partial".
+    assert moved == []
+    assert [a["result"] for a in audit] == ["failed"]
 
 
 def test_dry_run_mailto_only_text_output_does_not_promise_an_attempt(monkeypatch):
