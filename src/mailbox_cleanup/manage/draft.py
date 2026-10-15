@@ -9,13 +9,15 @@ Drafts folder on a guess (spec §7.2) and never deletes, moves or flags-as-delet
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
 from imap_tools import MailMessageFlags
 
 from ..folders import resolve_folder
-from .headers import clean_header_value, is_bare_address
+from .headers import MAX_RECIPIENTS, clean_header_value, is_bare_address, set_addresses
 from .ids import safe_message_id
 from .read import Message
 
@@ -33,7 +35,125 @@ class NoDraftsFolderError(Exception):
     """No \\Drafts folder was found. Spec §7.2: stop; never create one on a guess."""
 
 
-def build_reply(original: Message, *, from_addr: str, body: str) -> tuple[EmailMessage, list[str]]:
+_NO_SENDER = "original has no usable sender address"
+_NO_RECIPIENT = f"{_NO_SENDER}; draft has no recipient"
+
+
+class RecipientError(ValueError):
+    """A refused recipient plan. `code` is the CLI error code; the message names the rule,
+    never an address: it ends up in output next to mail-derived text."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class Recipients:
+    to: list[str] = field(default_factory=list)
+    cc: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    over_limit: bool = False
+
+
+def _bare(value: str) -> str | None:
+    """The one bare address in `value`, or None. Same rule as everywhere else: parseaddr,
+    then the strict allowlist (headers.is_bare_address) on what it returned."""
+    _, addr = parseaddr(value or "")
+    return addr if addr and is_bare_address(addr) else None
+
+
+def plan_recipients(
+    original: Message,
+    *,
+    own_addr: str,
+    sender_only: bool = False,
+    drop: Sequence[str] = (),
+    enforce_cap: bool = True,
+) -> Recipients:
+    """Who gets the reply (design docs/2026-10-15-reply-all-design.md).
+
+    Every address comes from the answered mail, which its sender controls; the caller can
+    only take addresses away. Main recipient: Reply-To, else From. Reply-all (default)
+    adds the original To to To and keeps the original Cc in Cc. The owner's own address is
+    removed and duplicates collapse, both case-insensitively. On a mail the owner sent,
+    the reply goes to that mail's To instead of back to the owner. Unusable addresses are
+    left out with a count. More than MAX_RECIPIENTS is refused, never truncated;
+    `enforce_cap=False` (the preview) lists them all and sets `over_limit` instead, so
+    the user can see whom to leave out. Dropping every recipient is refused.
+    """
+    own = own_addr.lower()
+    plan = Recipients()
+    seen = {own}
+    unusable = 0
+
+    def add(target: list[str], raw: str) -> None:
+        nonlocal unusable
+        if not raw:
+            return
+        addr = _bare(raw)
+        if addr is None:
+            unusable += 1
+        elif addr.lower() not in seen:
+            seen.add(addr.lower())
+            target.append(addr)
+
+    main = _bare(original.reply_to or original.sender)
+    self_sent = main is not None and main.lower() == own
+    if main is not None and not self_sent:
+        seen.add(main.lower())
+        plan.to.append(main)
+    if self_sent or not sender_only:
+        for raw in original.to:
+            add(plan.to, raw)
+    if not sender_only:
+        for raw in original.cc:
+            add(plan.cc, raw)
+
+    wanted = []
+    for value in drop:
+        addr = _bare(value)
+        if addr is None or addr.lower() not in {a.lower() for a in plan.to + plan.cc}:
+            raise RecipientError(
+                "not_a_recipient",
+                "--drop takes one address that is among the planned recipients; "
+                "run --preview to see them",
+            )
+        wanted.append(addr.lower())
+    plan.to = [a for a in plan.to if a.lower() not in wanted]
+    plan.cc = [a for a in plan.cc if a.lower() not in wanted]
+    if not plan.to and plan.cc:
+        plan.to.append(plan.cc.pop(0))
+    if drop and not plan.to:
+        # The caller's own choices emptied a list that had someone on it: a draft with
+        # no recipient reads like a finished one, so it is refused, as compose does.
+        raise RecipientError(
+            "no_recipient_left",
+            "the options leave no recipient; run --preview without --drop to see them",
+        )
+
+    plan.over_limit = len(plan.to) + len(plan.cc) > MAX_RECIPIENTS
+    if plan.over_limit and enforce_cap:
+        raise RecipientError(
+            "too_many_recipients",
+            f"the reply would go to more than {MAX_RECIPIENTS} addresses; answer with "
+            "--sender-only, or leave addresses out with --drop",
+        )
+
+    if main is None:
+        plan.warnings.append(_NO_RECIPIENT if not (plan.to or plan.cc) else _NO_SENDER)
+    if unusable:
+        noun = "address" if unusable == 1 else "addresses"
+        verb = "is" if unusable == 1 else "are"
+        plan.warnings.append(
+            f"{unusable} recipient {noun} of the original {verb} unusable and left out"
+        )
+    return plan
+
+
+def build_reply(
+    original: Message, *, from_addr: str, body: str, recipients: Recipients | None = None
+) -> tuple[EmailMessage, list[str]]:
     """Build an in-memory RFC 5322 reply. Never touches the network.
 
     Threading (In-Reply-To/References) is attempted only when `original.message_id` is
@@ -50,24 +170,16 @@ def build_reply(original: Message, *, from_addr: str, body: str) -> tuple[EmailM
     msg["Subject"] = subject if _RE_PREFIX.match(subject) else f"Re: {subject}".strip()
     msg["From"] = from_addr
 
-    # Minor 2+3 (fix round 2 — reopened): relying on EmailMessage()'s address parser to
-    # RAISE on a bad value is not a safe gate — `EmailMessage()["To"] = '"x" <'` raises
-    # IndexError on Python 3.11 but silently becomes 'x, <>' with no exception at all on
-    # 3.12/3.13/3.14 (pyproject allows any of these: requires-python >=3.11, no upper
-    # bound), so exception-catching alone is fail-open on newer interpreters. Instead:
-    # parse with parseaddr and accept the result only if it is a single, strict addr-spec
-    # (headers.is_bare_address). The bare address (no display name) is the safe value we set — a
-    # display name is untrusted, mail-derived text and re-parsing it buys nothing here.
-    # The try/except below is a second-layer guard only, never the mechanism: a value
-    # that already passed the strict check is not expected to raise.
-    _, parsed_addr = parseaddr(original.reply_to or original.sender)
-    if parsed_addr and is_bare_address(parsed_addr):
-        try:
-            msg["To"] = parsed_addr
-        except Exception:
-            warnings.append("original has no usable sender address; draft has no recipient")
-    else:
-        warnings.append("original has no usable sender address; draft has no recipient")
+    # Recipients are bare addresses that passed the strict allowlist (plan_recipients);
+    # they are written as address objects and read back (headers.set_addresses), the same
+    # two locks `manage compose` uses. A display name is untrusted, mail-derived text and
+    # never written. The "was it one address?" history of this check: see git log.
+    plan = recipients if recipients is not None else plan_recipients(original, own_addr=from_addr)
+    warnings.extend(plan.warnings)
+    if plan.to:
+        set_addresses(msg, "To", plan.to)
+    if plan.cc:
+        set_addresses(msg, "Cc", plan.cc)
 
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=from_addr.split("@")[-1] or None)

@@ -17,15 +17,17 @@ from mailbox_cleanup.manage.search import search
 pytestmark = pytest.mark.integration
 
 
-def _seed(message_id: str, subject: str, body: str = "Hallo") -> None:
+def _seed(
+    message_id: str,
+    subject: str,
+    body: str = "Hallo",
+    addresses: str = "From: mira@example.org\r\nTo: test@localhost\r\n",
+) -> None:
     s = smtplib.SMTP("127.0.0.1", 3025, local_hostname="localhost")  # see tests/conftest.py
     s.sendmail(
         "seed@example.com",
         ["test@localhost"],
-        (
-            f"From: mira@example.org\r\nTo: test@localhost\r\nSubject: {subject}\r\n"
-            f"Message-ID: {message_id}\r\n\r\n{body}\r\n"
-        ).encode(),
+        (f"{addresses}Subject: {subject}\r\nMessage-ID: {message_id}\r\n\r\n{body}\r\n").encode(),
     )
     s.quit()
     time.sleep(0.5)
@@ -101,9 +103,59 @@ def test_cli_draft_writes_and_reports_folder(drafts_ready, patch_account, tmp_pa
     assert out["ok"] is True and out["subcommand"] == "manage.draft"
     assert out["drafts_folder"] and out["warnings"] == []
     assert out["subject"].startswith("<mail-content>\n") and "Re: Termin" in out["subject"]
-    assert out["to"].startswith("<mail-content>\n") and "mira@example.org" in out["to"]
+    (to,) = out["to"]  # the seeded mail went to the account's own address only
+    assert to.startswith("<mail-content>\n") and "mira@example.org" in to
+    assert out["cc"] == []
     with open_mb(drafts_ready) as mb:
         _assert_not_seen(mb, "INBOX", uid)
+
+
+def test_cli_draft_answers_everyone_on_a_real_server(
+    drafts_ready, patch_account, tmp_path, open_mb
+):
+    """Reply-all end to end: Cc is parsed from a real IMAP fetch, the own address leaves,
+    the preview matches the write, and the appended draft carries To and Cc as planned
+    (docs/2026-10-15-reply-all-design.md)."""
+    from click.testing import CliRunner
+
+    from mailbox_cleanup.cli import cli
+
+    _seed(
+        "<ra1@example.org>",
+        "Runde",
+        body="Wer kommt?",
+        addresses=(
+            "From: Mira <mira@example.org>\r\n"
+            "To: test@localhost, Ben <ben@example.org>\r\n"
+            "Cc: cara@example.net, TEST@localhost\r\n"
+        ),
+    )
+    patch_account(drafts_ready)
+    with open_mb(drafts_ready) as mb:
+        uid = _uid_by_message_id(mb, "mira@example.org", "<ra1@example.org>")
+    body = tmp_path / "body.txt"
+    body.write_text("Ich komme.", encoding="utf-8")
+    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", uid, "--preview"])
+    assert res.exit_code == 0, res.output
+    preview = json.loads(res.output)
+    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", uid, "--body-file", str(body)])
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert out["to"] == preview["to"] and out["cc"] == preview["cc"]
+    assert len(out["to"]) == 2
+    assert "mira@example.org" in out["to"][0] and "ben@example.org" in out["to"][1]
+    (cc,) = out["cc"]
+    assert "cara@example.net" in cc
+    with open_mb(drafts_ready) as mb:
+        mb.folder.set(out["drafts_folder"])
+        drafts = [
+            d
+            for d in mb.fetch(AND(all=True), mark_seen=False)
+            if d.headers.get("in-reply-to", ("",))[0].strip() == "<ra1@example.org>"
+        ]
+        assert len(drafts) == 1
+        assert drafts[0].to == ("mira@example.org", "ben@example.org")
+        assert drafts[0].cc == ("cara@example.net",)
 
 
 def test_save_draft_to_a_non_ascii_folder_name(manage_mailbox, open_mb, monkeypatch):

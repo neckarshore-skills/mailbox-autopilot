@@ -26,8 +26,9 @@ from .attachments import (
     write_exclusive,
 )
 from .compose import ComposeError, build_new
-from .draft import NoDraftsFolderError, build_reply, save_draft
+from .draft import NoDraftsFolderError, RecipientError, build_reply, plan_recipients, save_draft
 from .envelope import wrap
+from .headers import is_bare_address
 from .ids import safe_message_id
 from .playbooks import load_playbooks, public_playbooks
 from .read import _UID_RE, Message, read_message
@@ -401,37 +402,80 @@ def outbox_cmd(json_mode):
 @click.option("--account", "account_flag", default=None)
 @click.option("--folder", default="INBOX", show_default=True)
 @click.option("--uid", required=True, help="UID of the mail being answered")
-@click.option("--body-file", required=True, help="A text file in the outbox; see `manage outbox`.")
+@click.option("--body-file", default=None, help="A text file in the outbox; see `manage outbox`.")
+@click.option(
+    "--preview", is_flag=True, help="Show the planned recipients and subject; write nothing."
+)
+@click.option("--sender-only", is_flag=True, help="Answer the sender only, not everyone.")
+@click.option(
+    "--drop",
+    multiple=True,
+    help="Leave one planned recipient out; repeat for more. Cannot add anyone.",
+)
 @click.option("--json", "json_mode", is_flag=True, help="Accepted for symmetry; output is JSON.")
-def draft_cmd(account_flag, folder, uid, body_file, json_mode):
+def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, json_mode):
+    """Put a reply into the Drafts folder. Answers everyone by default. Never sends."""
     account, creds = _resolve(account_flag)
-    arg_keys = ["uid", "body_file"]
+    arg_keys = ["uid"] + (["body_file"] if body_file is not None else [])
     # R4: "folder" joins arg_keys only when the user actually passed --folder, not for
     # its default — unlike search/read/thread, which never track it at all.
     ctx = click.get_current_context()
     if ctx.get_parameter_source("folder") == ParameterSource.COMMANDLINE:
         arg_keys.append("folder")
+    arg_keys += _arg_keys(preview=preview, sender_only=sender_only, drop=drop)
     fail = dict(subcommand="manage.draft", account=account, folder=folder, arg_keys=arg_keys)
     _reject_control_chars(fail, folder=folder)
     if not _UID_RE.fullmatch(uid):
         _fail_audited(
             **fail, code="bad_args", message="--uid must contain only ASCII digits", exit_code=4
         )
-    # --body-file is a plain str, not click.Path(...): click would reject a missing file or
-    # a directory itself (exit 2, usage text, no JSON, no audit). Every refusal of the file
-    # ends in the same audited bad_args; see manage/bodyfile.py for the rules.
-    body = bodyfile.read_body_file(body_file)
-    if body is None:
-        _fail_audited(**fail, code="bad_args", message=_BODY_FILE_MESSAGE, exit_code=4)
+    if not all(is_bare_address(d) for d in drop):
+        _fail_audited(
+            **fail,
+            code="bad_args",
+            message="--drop takes one bare ASCII address per use (name@example.org)",
+            exit_code=4,
+        )
+    body = None
+    if not preview:
+        if body_file is None:
+            _fail_audited(
+                **fail,
+                code="bad_args",
+                message="--body-file is required unless --preview is given",
+                exit_code=4,
+            )
+        # --body-file is a plain str, not click.Path(...): click would reject a missing file
+        # or a directory itself (exit 2, usage text, no JSON, no audit). Every refusal of
+        # the file ends in the same audited bad_args; see manage/bodyfile.py for the rules.
+        body = bodyfile.read_body_file(body_file)
+        if body is None:
+            _fail_audited(**fail, code="bad_args", message=_BODY_FILE_MESSAGE, exit_code=4)
     not_found = False
+    refused = None
+    drafts = None
     try:
         with imap_connect(creds, port=account.port) as mb:
             orig = read_message(mb, uid=uid, folder=folder)
             if orig is None:
                 not_found = True
             else:
-                msg, warnings = build_reply(orig, from_addr=account.email, body=body)
-                drafts = save_draft(mb, msg)
+                try:
+                    plan = plan_recipients(
+                        orig,
+                        own_addr=account.email,
+                        sender_only=sender_only,
+                        drop=drop,
+                        enforce_cap=not preview,
+                    )
+                except RecipientError as e:
+                    refused = e
+                else:
+                    msg, warnings = build_reply(
+                        orig, from_addr=account.email, body=body or "", recipients=plan
+                    )
+                    if not preview:
+                        drafts = save_draft(mb, msg)
     except NoDraftsFolderError:  # Minor 1: never str(e) — a literal message, per R4
         _fail_audited(
             **fail, code="no_drafts_folder", message="no Drafts folder found", exit_code=5
@@ -447,26 +491,35 @@ def draft_cmd(account_flag, folder, uid, body_file, json_mode):
         _fail_audited(
             **fail, code="not_found", message=f"no message with UID {uid} in {folder}", exit_code=1
         )
+    if refused is not None:
+        # RecipientError's message names the rule and the way out, never an address.
+        _fail_audited(**fail, code=refused.code, message=str(refused), exit_code=4)
     log_manage_action(
         subcommand="manage.draft",
         account=account.alias,
         folder=folder,
         uids=[uid],
-        result="success",
+        result="preview" if preview else "success",
         arg_keys=arg_keys,
     )
-    _out(
-        {
-            "ok": True,
-            "subcommand": "manage.draft",
-            "drafts_folder": drafts,
-            "warnings": warnings,
-            "subject": wrap(msg["Subject"]),
-            # msg["To"] can be None (Minor 2+3: no usable sender address) — a warning
-            # already covers that case, this just avoids wrap() crashing on None.
-            "to": wrap(msg["To"] or ""),
-        }
-    )
+    # Recipients are read back from the built message, not from the plan, so the owner
+    # sees what is (or would be) in the draft. They passed the strict address allowlist,
+    # but they are still text from the mail: each one keeps its envelope, like the subject.
+    out = {
+        "ok": True,
+        "subcommand": "manage.draft",
+        "warnings": warnings,
+        "subject": wrap(msg["Subject"]),
+        "to": [wrap(a.addr_spec) for a in msg["To"].addresses] if msg["To"] else [],
+        "cc": [wrap(a.addr_spec) for a in msg["Cc"].addresses] if msg["Cc"] else [],
+    }
+    if preview:
+        out["preview"] = True
+        # Shown, not refused, so the user can pick whom to --drop; the write refuses.
+        out["over_limit"] = plan.over_limit
+    else:
+        out["drafts_folder"] = drafts
+    _out(out)
 
 
 # Ticket criterion 5: what version 1 leaves out is refused by name. Without these hidden

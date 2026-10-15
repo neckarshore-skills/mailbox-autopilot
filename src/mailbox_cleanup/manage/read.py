@@ -31,6 +31,8 @@ class Message:
     text: str
     # tuple of manage.attachments.Attachment; listed by `read`, fetched by `save-attachment`
     attachments: tuple = ()
+    # Cc of the answered mail, bare addresses; read by `manage draft` for reply-all
+    cc: tuple[str, ...] = ()
 
 
 class _Text(HTMLParser):
@@ -92,6 +94,7 @@ def to_message(msg, folder: str) -> Message:
         date=msg.date.isoformat() if msg.date else "",
         text=text,
         attachments=list_attachments(msg),
+        cc=tuple(msg.cc or ()),
     )
 
 

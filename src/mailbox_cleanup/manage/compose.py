@@ -11,15 +11,16 @@ warning, because a draft that silently lost a recipient reads like a finished on
 from __future__ import annotations
 
 from collections.abc import Sequence
-from email.headerregistry import Address
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
-from .headers import clean_header_value, is_bare_address
-
-# To and Cc together. A mail that deceived the agent into addressing a crowd is stopped
-# here, not by a human counting recipients in a draft.
-MAX_RECIPIENTS = 10
+from .headers import (
+    MAX_RECIPIENTS,
+    AddressHeaderError,
+    clean_header_value,
+    is_bare_address,
+    set_addresses,
+)
 
 
 class ComposeError(ValueError):
@@ -42,19 +43,10 @@ def _check_addresses(option: str, values: Sequence[str]) -> list[str]:
 
 
 def _set_addresses(msg: EmailMessage, header: str, option: str, addrs: list[str]) -> None:
-    """Write `addrs` as address objects, then read the header back and compare.
-
-    Address objects, not a joined string: a string is parsed again by the mail library,
-    and that second parse is where one accepted value turned into two recipients. The
-    read-back is the second lock: whatever the header holds must be exactly the input,
-    one address each and no display name, or the command refuses."""
     try:
-        msg[header] = [Address(addr_spec=a) for a in addrs]
-        stored = [(a.addr_spec, a.display_name) for a in msg[header].addresses]
-    except Exception as e:  # the parser raises several unrelated types on odd input
+        set_addresses(msg, header, addrs)
+    except AddressHeaderError as e:
         raise _bad_address(option) from e
-    if stored != [(a, "") for a in addrs]:
-        raise _bad_address(option)
 
 
 def build_new(

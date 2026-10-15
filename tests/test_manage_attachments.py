@@ -43,6 +43,7 @@ def _msg(*atts, uid="7"):
         from_="kitchen@example.com",
         reply_to=(),
         to=("test@localhost",),
+        cc=(),
         subject="Menu",
         date=None,
         attachments=list(atts),
