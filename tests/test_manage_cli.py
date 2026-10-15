@@ -352,7 +352,7 @@ def test_draft_rejects_non_digit_uid_before_any_imap_call(audit, monkeypatch, tm
     monkeypatch.setattr(mcli, "imap_connect", _record)
     body = _write_body(tmp_path)
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "1 OR 1", "--body-file", body, "--json"]
+        cli, ["manage", "draft", "--no-quote", "--uid", "1 OR 1", "--body-file", body, "--json"]
     )
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "bad_args"
@@ -368,7 +368,7 @@ def test_draft_missing_body_file_is_audited_bad_args(audit, monkeypatch, tmp_pat
     monkeypatch.setattr(mcli, "imap_connect", _fake_connect)
     missing = str(tmp_path / "does-not-exist.txt")
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "7", "--body-file", missing, "--json"]
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", missing, "--json"]
     )
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "bad_args"
@@ -380,7 +380,7 @@ def test_draft_directory_as_body_file_is_audited_bad_args(audit, monkeypatch, tm
     """Important 1: a directory path must not hit click's own dir_okay rejection either."""
     monkeypatch.setattr(mcli, "imap_connect", _fake_connect)
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "7", "--body-file", str(tmp_path), "--json"]
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", str(tmp_path), "--json"]
     )
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "bad_args"
@@ -397,7 +397,7 @@ def test_draft_fifo_as_body_file_is_audited_bad_args_not_hung(audit, monkeypatch
     fifo = tmp_path / "body.fifo"
     os.mkfifo(fifo)
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "7", "--body-file", str(fifo), "--json"]
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", str(fifo), "--json"]
     )
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "bad_args"
@@ -421,7 +421,7 @@ def test_draft_fifo_swapped_in_after_a_type_check_does_not_hang(audit, monkeypat
 
     def run():
         out["res"] = CliRunner().invoke(
-            cli, ["manage", "draft", "--uid", "7", "--body-file", str(fifo), "--json"]
+            cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", str(fifo), "--json"]
         )
 
     t = threading.Thread(target=run, daemon=True)
@@ -449,7 +449,7 @@ def test_draft_unreadable_body_file_is_audited_bad_args(audit, monkeypatch, tmp_
     p.chmod(0o000)
     try:
         res = CliRunner().invoke(
-            cli, ["manage", "draft", "--uid", "7", "--body-file", str(p), "--json"]
+            cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", str(p), "--json"]
         )
     finally:
         p.chmod(0o644)
@@ -464,7 +464,7 @@ def test_draft_non_utf8_body_file_is_audited_bad_args(audit, monkeypatch, tmp_pa
     p = tmp_path / "body.txt"
     p.write_bytes(b"\xff\xfe not valid utf-8")
     res = CliRunner().invoke(
-        cli, ["manage", "draft", "--uid", "7", "--body-file", str(p), "--json"]
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", str(p), "--json"]
     )
     assert res.exit_code == 4, res.output
     assert json.loads(res.output)["error_code"] == "bad_args"
@@ -476,7 +476,9 @@ def test_draft_not_found_is_audited(audit, monkeypatch, tmp_path):
     monkeypatch.setattr(mcli, "imap_connect", _fake_connect)
     monkeypatch.setattr(mcli, "read_message", lambda mb, *, uid, folder: None)
     body = _write_body(tmp_path)
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "7", "--body-file", body, "--json"])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", body, "--json"]
+    )
     assert res.exit_code == 1, res.output
     assert json.loads(res.output)["error_code"] == "not_found"
     (rec,) = _records(audit)
@@ -493,7 +495,9 @@ def test_draft_no_drafts_folder_is_audited_never_leaks_exception_text(audit, mon
 
     monkeypatch.setattr(mcli, "save_draft", _boom_save)
     body = _write_body(tmp_path)
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "7", "--body-file", body, "--json"])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", body, "--json"]
+    )
     assert res.exit_code == 5, res.output
     assert json.loads(res.output)["error_code"] == "no_drafts_folder"
     assert SENTINEL not in res.output
@@ -508,7 +512,9 @@ def test_draft_operation_error_never_leaks_exception_text(audit, monkeypatch, tm
 
     monkeypatch.setattr(mcli, "imap_connect", _boom)
     body = _write_body(tmp_path)
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "7", "--body-file", body, "--json"])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--no-quote", "--uid", "7", "--body-file", body, "--json"]
+    )
     assert res.exit_code == 2, res.output
     out = json.loads(res.output)
     assert out["error_code"] == "operation_error"
@@ -529,7 +535,18 @@ def test_draft_success_audits_source_folder_not_drafts_folder(audit, monkeypatch
     body = _write_body(tmp_path)
     res = CliRunner().invoke(
         cli,
-        ["manage", "draft", "--uid", "7", "--folder", "Custom", "--body-file", body, "--json"],
+        [
+            "manage",
+            "draft",
+            "--no-quote",
+            "--uid",
+            "7",
+            "--folder",
+            "Custom",
+            "--body-file",
+            body,
+            "--json",
+        ],
     )
     assert res.exit_code == 0, res.output
     out = json.loads(res.output)

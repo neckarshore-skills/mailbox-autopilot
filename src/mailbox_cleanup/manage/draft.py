@@ -8,6 +8,7 @@ Drafts folder on a guess (spec §7.2) and never deletes, moves or flags-as-delet
 
 from __future__ import annotations
 
+import datetime
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -151,8 +152,64 @@ def plan_recipients(
     return plan
 
 
+QUOTE_LANGS = ("de", "en")
+_NO_DATE = datetime.datetime(1900, 1, 1)
+
+
+def _attribution(original: Message, lang: str) -> str:
+    """The line above the quote. The sender is the bare From address, never its display
+    name (mail-chosen text) and never the Reply-To (that is where the reply goes, not who
+    wrote). A missing date or an unusable sender drops that part of the line."""
+    sender = _bare(original.sender) or ""
+    when = None
+    if original.date:
+        try:
+            when = datetime.datetime.fromisoformat(original.date)
+        except ValueError:
+            when = None
+    if when == _NO_DATE:
+        when = None  # imap_tools' placeholder for a missing or unparseable Date header
+    if lang == "de":
+        date = when.strftime("Am %d.%m.%Y um %H:%M") if when else ""
+        if date and sender:
+            return f"{date} schrieb {sender}:"
+        if date:
+            return f"{date} schrieb:"
+        return f"{sender} schrieb:" if sender else "Ursprüngliche Nachricht:"
+    date = when.strftime("On %Y-%m-%d at %H:%M") if when else ""
+    if date and sender:
+        return f"{date}, {sender} wrote:"
+    if date:
+        return f"{date}, someone wrote:"
+    return f"{sender} wrote:" if sender else "Original message:"
+
+
+def quote_block(original: Message, lang: str) -> str:
+    """The answered mail as a quote: an attribution line, then every line of its text
+    prefixed with `> ` (a blank line with `>`, an already quoted line with one more `>`),
+    the way mail clients quote. `lang` is the language of the reply, "de" or "en"."""
+    if lang not in QUOTE_LANGS:
+        raise ValueError(f"quote language must be one of {', '.join(QUOTE_LANGS)}")
+    text = original.text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    lines = [_attribution(original, lang)]
+    if text:
+        for line in text.split("\n"):
+            if not line:
+                lines.append(">")
+            elif line.startswith(">"):
+                lines.append(">" + line)
+            else:
+                lines.append("> " + line)
+    return "\n".join(lines)
+
+
 def build_reply(
-    original: Message, *, from_addr: str, body: str, recipients: Recipients | None = None
+    original: Message,
+    *,
+    from_addr: str,
+    body: str,
+    recipients: Recipients | None = None,
+    quote_lang: str | None = None,
 ) -> tuple[EmailMessage, list[str]]:
     """Build an in-memory RFC 5322 reply. Never touches the network.
 
@@ -203,6 +260,10 @@ def build_reply(
             warnings.append(f"References chain trimmed to the last {_MAX_REFERENCES} IDs")
         msg["References"] = " ".join(full_chain)
 
+    if quote_lang is not None:
+        # Newest text on top, the answered mail below (Founder decision 2026-10-15). It
+        # quotes only the mail being answered, never another thread message.
+        body = f"{body.rstrip()}\n\n{quote_block(original, quote_lang)}\n"
     msg.set_content(body)
     return msg, warnings
 

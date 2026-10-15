@@ -210,7 +210,8 @@ def test_cli_outbox_says_so_when_the_folder_is_not_private(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    "cmd", [["draft", "--uid", "7"], ["compose", "--to", "a@example.org", "--subject", "s"]]
+    "cmd",
+    [["draft", "--uid", "7", "--no-quote"], ["compose", "--to", "a@example.org", "--subject", "s"]],
 )
 def test_both_drafting_commands_read_from_the_outbox_only(cmd, outbox, tmp_path, monkeypatch):
     """`manage draft` is held to the same rule as `manage compose`: its recipient is the

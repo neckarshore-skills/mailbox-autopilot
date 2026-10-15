@@ -97,7 +97,9 @@ def test_cli_draft_writes_and_reports_folder(drafts_ready, patch_account, tmp_pa
         uid = _uid_by_message_id(mb, "mira@example.org", "<t1@example.org>")
     body = tmp_path / "body.txt"
     body.write_text("Dienstag passt.", encoding="utf-8")
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", uid, "--body-file", str(body)])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--no-quote", "--uid", uid, "--body-file", str(body)]
+    )
     assert res.exit_code == 0, res.output
     out = json.loads(res.output)
     assert out["ok"] is True and out["subcommand"] == "manage.draft"
@@ -138,7 +140,9 @@ def test_cli_draft_answers_everyone_on_a_real_server(
     res = CliRunner().invoke(cli, ["manage", "draft", "--uid", uid, "--preview"])
     assert res.exit_code == 0, res.output
     preview = json.loads(res.output)
-    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", uid, "--body-file", str(body)])
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--quote-lang", "de", "--uid", uid, "--body-file", str(body)]
+    )
     assert res.exit_code == 0, res.output
     out = json.loads(res.output)
     assert out["to"] == preview["to"] and out["cc"] == preview["cc"]
@@ -156,6 +160,13 @@ def test_cli_draft_answers_everyone_on_a_real_server(
         assert len(drafts) == 1
         assert drafts[0].to == ("mira@example.org", "ben@example.org")
         assert drafts[0].cc == ("cara@example.net",)
+        text = drafts[0].text.replace("\r\n", "\n")
+        assert text.startswith("Ich komme.\n\n")
+        # The seeded mail may carry no Date header; the line then reads "<addr> schrieb:".
+        attribution, quoted = text.split("\n\n", 1)[1].split("\n", 1)
+        assert "mira@example.org" in attribution and "schrieb" in attribution
+        assert "1900" not in attribution
+        assert quoted.startswith("> Wer kommt?")
 
 
 def test_save_draft_to_a_non_ascii_folder_name(manage_mailbox, open_mb, monkeypatch):
