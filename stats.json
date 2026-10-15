@@ -1,16 +1,16 @@
 {
   "repo": "neckarshore-skills/mailbox-autopilot",
-  "audited_sha": "152b8aa9d0da3b17ff45e9f2e45cc0b79a53d5bf",
+  "audited_sha": "2a1a1732b90328b9b34cd2c25aebd7f31550b6d7",
   "red": false,
   "red_detail": null,
   "tests": {
-    "total": 870,
+    "total": 887,
     "byType": {
-      "unit": 833,
+      "unit": 850,
       "integration": 37
     },
     "declared": {},
     "lenses": {}
   },
-  "updatedAt": "2026-10-15T19:29:18Z"
+  "updatedAt": "2026-10-15T21:28:32Z"
 }
