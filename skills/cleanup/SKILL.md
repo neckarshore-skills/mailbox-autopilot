@@ -110,6 +110,9 @@ Replace `<ACCOUNT>` with the chosen alias (or omit the `--account` flag when onl
 | "Wer schickt am meisten?" | `mailbox-autopilot senders --account=<ACCOUNT> --top 20 --json` |
 | "Lösch alles von X" | `mailbox-autopilot delete --account=<ACCOUNT> --sender X --json` (then `--apply`) |
 | "Alle Newsletter älter als 2 Tage, außer X und Y" | `mailbox-autopilot delete --account=<ACCOUNT> --category newsletter --older-than 2d --keep x@example.com --keep @example.org --json` |
+| "X immer behalten" / "X nie löschen" | `mailbox-autopilot config keep add --account=<ACCOUNT> x@example.com --json` (only after the user said yes to exactly these entries) |
+| "Was behalte ich immer?" | `mailbox-autopilot config keep list --account=<ACCOUNT> --json` |
+| "X nicht mehr behalten" | `mailbox-autopilot config keep remove --account=<ACCOUNT> x@example.com --json` |
 | "Diese Absender weg" (several) | `mailbox-autopilot delete --account=<ACCOUNT> --sender a@example.com --sender b@example.com --json` |
 | "Alles an Adresse X" | `mailbox-autopilot delete --account=<ACCOUNT> --recipient x@example.com --json` |
 | "Alle Newsletter ins Archiv" | `mailbox-autopilot move --account=<ACCOUNT> --to Archiv --category newsletter --json` |
@@ -126,7 +129,8 @@ Replace `<ACCOUNT>` with the chosen alias (or omit the `--account` flag when onl
 | 0 | Success | Continue |
 | 2 | Connection error | Show stderr, do not retry blindly |
 | 3 | Auth missing | Tell user to run `auth set` in a real terminal |
-| 4 | Bad arguments / account resolution (`bad_args`, `no_account_selected`, `unknown_account`, `duplicate_alias`, `duplicate_email`, `bootstrap_failed`) | Show stderr; re-check `config list --json` if needed |
+| 4 | Bad arguments / account resolution (`bad_args`, `no_account_selected`, `unknown_account`, `duplicate_alias`, `duplicate_email`, `bootstrap_failed`, `not_in_keep_list`) | Show stderr; re-check `config list --json` if needed |
+| 4 | `bad_config`: the config file cannot be used, for example a keep entry that is neither an address nor `@domain`; nothing connected | Show the message. Never edit `config.json` by hand to fix it; ask the user |
 | 4 | `preview_mismatch`: the set changed since the dry-run; nothing was moved | Run the dry-run again, show the new count, ask again |
 | 5 | `unsubscribe_failed`: the HTTPS unsubscribe failed; nothing was moved | Say it failed, show `manual_unsubscribe` as the by-hand list and `refused_unsubscribe` as "refused as unsafe, do not open". Do not retry automatically |
 | 5 | Partial failure / config error (`partial_failure`, `no_config`, `config_corrupt`, `schema_version_unsupported`) | For `partial_failure`: tell the user `moved_count` moved and `not_moved_count` did not; the audit record names the moved UIDs. Do not retry automatically |
@@ -167,6 +171,18 @@ ASCII transliteration (`Verlaengerung`) or the English word from a bilingual sub
 `--keep` takes a full address or a domain written as `@example.com` (subdomains included).
 A name such as "The Code" is refused. Find the sender's address in the dry-run's
 `by_sender` block, show it to the user, and pass that address.
+
+Each account also has a **persistent keep list** (since 0.5.0, `config keep add|remove|list`).
+Before the first `config keep add`, check `mailbox-autopilot --version`: below 0.5.0 the
+subcommand does not exist and an existing list is not applied.
+`delete`, `move`, `unsubscribe` and `bounces` on that account never touch mail from those
+senders, and for `delete` and `move` the list adds to any `--keep` flags. In every dry-run,
+name what the list kept: `kept_by_config` of `kept_count`, with `keep_config` as the list.
+
+When the user keeps the same sender a second time by `--keep`, offer once to put it on the
+account's list. Write to the list only after an explicit yes to the exact entries, and show
+the result of `config keep list` afterwards. Removing an entry is the user's call too:
+afterwards that sender's mail can be deleted again.
 
 ## Hard rules
 

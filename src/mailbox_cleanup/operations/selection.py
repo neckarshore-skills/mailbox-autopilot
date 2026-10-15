@@ -10,6 +10,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from ..classify import is_automated, is_bounce, is_newsletter
+from ..config import normalize_keep
 from ..scan import _flatten_headers
 from .filters import build_imap_search
 
@@ -23,19 +24,12 @@ CATEGORIES = {
 def parse_keep(entries: Iterable[str]) -> tuple[frozenset[str], frozenset[str]]:
     """Split keep entries into exact addresses and domains ("@bank.example").
 
-    Anything else is refused: a bare word such as a newsletter's name would otherwise
-    have to be matched as a substring, and nobody can predict what that keeps.
+    Validation is shared with the configured keep list (config.normalize_keep).
     """
     addrs: set[str] = set()
     domains: set[str] = set()
-    for raw in entries:
-        e = (raw or "").strip().lower()
-        local, at, domain = e.partition("@")
-        if not at or not domain or "@" in domain or "." not in domain:
-            raise ValueError(
-                f"keep entry {raw!r} must be a full address (name@example.com) "
-                "or a domain (@example.com)"
-            )
+    for e in normalize_keep(entries):
+        local, _at, domain = e.partition("@")
         if local:
             addrs.add(e)
         else:
@@ -56,6 +50,7 @@ def _is_kept(addr: str, addrs: frozenset[str], domains: frozenset[str]) -> bool:
 class Selection:
     messages: list
     kept_count: int = 0
+    kept_by_config: int = 0
     by_sender: dict[str, int] = field(default_factory=dict)
 
 
@@ -69,11 +64,13 @@ def select_messages(
     recipient: str | None = None,
     category: str | None = None,
     keep: Iterable[str] = (),
+    config_keep: Iterable[str] = (),
     limit: int | None = None,
 ) -> Selection:
     if category is not None and category not in CATEGORIES:
         raise ValueError(f"unknown category {category!r}; one of {', '.join(sorted(CATEGORIES))}")
     addrs, domains = parse_keep(keep)
+    c_addrs, c_domains = parse_keep(config_keep)
     criteria = build_imap_search(
         sender=sender,
         subject_contains=subject_contains,
@@ -81,7 +78,7 @@ def select_messages(
         recipient=recipient,
         category=category,
     )
-    client_side = category is not None or bool(addrs or domains)
+    client_side = category is not None or bool(addrs or domains or c_addrs or c_domains)
     mb.folder.set(folder)
     msgs = list(
         mb.fetch(
@@ -93,6 +90,7 @@ def select_messages(
         )
     )
     kept = 0
+    kept_by_config = 0
     selected = []
     for m in msgs:
         if not m.uid:
@@ -103,6 +101,10 @@ def select_messages(
                 from_addr=m.from_ or "", subject=m.subject or "", headers=headers
             ):
                 continue
+        if _is_kept(m.from_, c_addrs, c_domains):
+            kept += 1
+            kept_by_config += 1
+            continue
         if _is_kept(m.from_, addrs, domains):
             kept += 1
             continue
@@ -110,4 +112,9 @@ def select_messages(
     if client_side and limit is not None:
         selected = selected[:limit]
     by_sender = Counter((m.from_ or "").strip().lower() for m in selected)
-    return Selection(messages=selected, kept_count=kept, by_sender=dict(by_sender.most_common()))
+    return Selection(
+        messages=selected,
+        kept_count=kept,
+        kept_by_config=kept_by_config,
+        by_sender=dict(by_sender.most_common()),
+    )

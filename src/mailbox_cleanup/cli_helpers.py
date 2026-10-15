@@ -23,7 +23,7 @@ class AccountFlagsError(Exception):
     """User-facing CLI error with structured error_code.
 
     error_code is one of: 'no_config', 'unknown_account', 'no_account_selected',
-    'bootstrap_failed'.
+    'bootstrap_failed', 'bad_config'.
     """
 
     def __init__(self, error_code: str, message: str):
@@ -77,7 +77,11 @@ def resolve_account_and_credentials(
         )
         account_flag = email_flag
 
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        # e.g. a bad keep entry written by hand: refuse before connecting.
+        raise AccountFlagsError("bad_config", str(e)) from e
     env_value = os.environ.get("MAILBOX_CLEANUP_ACCOUNT")
     try:
         account = resolve_account(cfg, flag=account_flag, env=env_value)

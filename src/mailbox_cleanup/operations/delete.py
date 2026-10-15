@@ -33,6 +33,7 @@ class DeleteResult:
     folder: str
     sample: list[dict]
     kept_count: int = 0
+    kept_by_config: int = 0
     by_sender: dict[str, int] = field(default_factory=dict)
 
 
@@ -52,6 +53,7 @@ def run_delete(
     recipient: str | None = None,
     category: str | None = None,
     keep: Iterable[str] = (),
+    config_keep: Iterable[str] = (),
     apply: bool = False,
     limit: int | None = None,
     expect_count: int | None = None,
@@ -70,6 +72,7 @@ def run_delete(
         recipient=recipient,
         category=category,
         keep=keep,
+        config_keep=config_keep,
         limit=limit,
     )
     uids = [m.uid for m in sel.messages]
@@ -89,5 +92,6 @@ def run_delete(
         folder=folder,
         sample=sample_of(sel.messages),
         kept_count=sel.kept_count,
+        kept_by_config=sel.kept_by_config,
         by_sender=sel.by_sender,
     )
