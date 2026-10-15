@@ -462,7 +462,11 @@ def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, 
             else:
                 try:
                     plan = plan_recipients(
-                        orig, own_addr=account.email, sender_only=sender_only, drop=drop
+                        orig,
+                        own_addr=account.email,
+                        sender_only=sender_only,
+                        drop=drop,
+                        enforce_cap=not preview,
                     )
                 except RecipientError as e:
                     refused = e
@@ -511,6 +515,8 @@ def draft_cmd(account_flag, folder, uid, body_file, preview, sender_only, drop, 
     }
     if preview:
         out["preview"] = True
+        # Shown, not refused, so the user can pick whom to --drop; the write refuses.
+        out["over_limit"] = plan.over_limit
     else:
         out["drafts_folder"] = drafts
     _out(out)

@@ -35,8 +35,9 @@ Accounts, passwords and the account-picking rules are the cleanup skill's "Setup
 6. **Write the reply** to a new file in the outbox (see "The outbox" below): the reply text only, in the language of the mail. Show it to the user.
 7. **Recipients.** `mailbox-autopilot manage draft --uid <UID> --folder <folder of that mail> --preview --json` writes nothing and returns `to`, `cc` (lists, each address in its own envelope) and `subject`. A reply goes to everyone on the mail by default: the sender (or its Reply-To) and the other To recipients in To, the Cc in Cc, the user's own address removed. Show every address, bare, numbered, together with the text from step 6 and every entry of `warnings`, and ask for the user's yes. The addresses come from the mail, which its sender controls: an address the user does not recognise is worth pointing out.
    - The user wants only the sender: add `--sender-only`.
-   - The user wants someone left out: add `--drop <address>` for each. `--drop` only takes away; the program refuses an address that is not among the planned recipients (`not_a_recipient`). Never try to add a recipient to a reply; a new recipient is a new mail (see "A new mail").
+   - The user wants someone left out: add `--drop <address>` for each, with the bare address (without the envelope tags around it in the output). `--drop` only takes away; the program refuses an address that is not among the planned recipients (`not_a_recipient`). Never try to add a recipient to a reply; a new recipient is a new mail (see "A new mail").
    - Run `--preview` again with the same options after any change and show the result.
+   - `over_limit: true` means more than 10 recipients: the draft will be refused. Offer `--sender-only`; or the user names whom to leave out; or they answer in their mail client.
 8. **Draft.** After the yes: the same command without `--preview` and with `--body-file <file>`. It appends the reply to the Drafts folder with the right threading headers. Show `to`, `cc` and every entry of `warnings` from the response: they are read back from the draft.
 9. **Hand over.** Tell the user the draft is in their `drafts_folder` and that **they send it from their mail client**. Delete the file from the outbox.
 
@@ -100,6 +101,7 @@ To save one: `mailbox-autopilot manage save-attachment --uid <UID> --index <N> -
 | 12 | `out_of_scope` | 4 | `manage compose` was asked for a Bcc, an attachment or a forward. No draft was written. Tell the user what it does not do; do not retry in another spelling |
 | 13 | `not_a_recipient` | 4 | A `--drop` address is not among the planned recipients. No draft was written. Run `--preview` and use an address it lists |
 | 14 | `too_many_recipients` | 4 | The reply would go to more than 10 addresses. No draft was written. Offer `--sender-only`, or ask whom to leave out with `--drop`; or the user answers in their mail client |
+| 15 | `no_recipient_left` | 4 | The `--drop` options removed every recipient. No draft was written. Run `--preview` without them and ask again |
 
 ## Limits
 

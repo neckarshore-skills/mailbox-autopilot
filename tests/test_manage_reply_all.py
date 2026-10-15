@@ -368,3 +368,54 @@ def test_drop_that_is_not_an_address_is_a_control_char_safe_refusal(audit, mail,
     )  # fmt: skip
     assert res.exit_code == 4, res.output
     assert mail == []
+
+
+# --- review round 1: an emptied list, and a preview that shows an over-long list -------
+
+
+def test_dropping_every_recipient_is_refused_not_an_empty_draft():
+    with pytest.raises(RecipientError) as e:
+        plan_recipients(_orig(), own_addr=ME, drop=("mira@example.org",))
+    assert e.value.code == "no_recipient_left"
+
+
+def test_sender_only_then_dropping_the_sender_is_refused():
+    o = _orig(to=(ME, "ben@example.org"))
+    with pytest.raises(RecipientError) as e:
+        plan_recipients(o, own_addr=ME, sender_only=True, drop=("mira@example.org",))
+    assert e.value.code == "no_recipient_left"
+
+
+def test_plan_without_the_cap_lists_everyone_and_marks_it():
+    many = tuple(f"p{i}@example.org" for i in range(MAX_RECIPIENTS))
+    plan = plan_recipients(_orig(to=(ME, *many)), own_addr=ME, enforce_cap=False)
+    assert len(plan.to) == MAX_RECIPIENTS + 1
+    assert plan.over_limit is True
+
+
+def test_preview_of_an_over_long_list_shows_it_so_drop_has_something_to_pick(audit, monkeypatch):
+    many = tuple(f"p{i}@example.org" for i in range(MAX_RECIPIENTS))
+    monkeypatch.setattr(mcli, "imap_connect", _fake_connect)
+    monkeypatch.setattr(mcli, "read_message", lambda mb, *, uid, folder: _orig(to=(ME, *many)))
+    res = CliRunner().invoke(cli, ["manage", "draft", "--uid", "1", "--preview", "--json"])
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert len(out["to"]) == MAX_RECIPIENTS + 1
+    assert out["over_limit"] is True
+    res = CliRunner().invoke(
+        cli, ["manage", "draft", "--uid", "1", "--preview", "--drop", "p0@example.org", "--json"]
+    )
+    assert json.loads(res.output)["over_limit"] is False
+
+
+def test_cli_refuses_an_emptied_list_and_writes_nothing(audit, mail, tmp_path):
+    res = CliRunner().invoke(
+        cli,
+        [
+            "manage", "draft", "--uid", "1", "--sender-only", "--drop", "mira@example.org",
+            "--body-file", _body(tmp_path), "--json",
+        ],
+    )  # fmt: skip
+    assert res.exit_code == 4, res.output
+    assert json.loads(res.output)["error_code"] == "no_recipient_left"
+    assert mail == []

@@ -53,6 +53,7 @@ class Recipients:
     to: list[str] = field(default_factory=list)
     cc: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    over_limit: bool = False
 
 
 def _bare(value: str) -> str | None:
@@ -68,6 +69,7 @@ def plan_recipients(
     own_addr: str,
     sender_only: bool = False,
     drop: Sequence[str] = (),
+    enforce_cap: bool = True,
 ) -> Recipients:
     """Who gets the reply (design docs/2026-10-15-reply-all-design.md).
 
@@ -76,7 +78,9 @@ def plan_recipients(
     adds the original To to To and keeps the original Cc in Cc. The owner's own address is
     removed and duplicates collapse, both case-insensitively. On a mail the owner sent,
     the reply goes to that mail's To instead of back to the owner. Unusable addresses are
-    left out with a count. More than MAX_RECIPIENTS is refused, never truncated.
+    left out with a count. More than MAX_RECIPIENTS is refused, never truncated;
+    `enforce_cap=False` (the preview) lists them all and sets `over_limit` instead, so
+    the user can see whom to leave out. Dropping every recipient is refused.
     """
     own = own_addr.lower()
     plan = Recipients()
@@ -120,8 +124,16 @@ def plan_recipients(
     plan.cc = [a for a in plan.cc if a.lower() not in wanted]
     if not plan.to and plan.cc:
         plan.to.append(plan.cc.pop(0))
+    if drop and not plan.to:
+        # The caller's own choices emptied a list that had someone on it: a draft with
+        # no recipient reads like a finished one, so it is refused, as compose does.
+        raise RecipientError(
+            "no_recipient_left",
+            "the options leave no recipient; run --preview without --drop to see them",
+        )
 
-    if len(plan.to) + len(plan.cc) > MAX_RECIPIENTS:
+    plan.over_limit = len(plan.to) + len(plan.cc) > MAX_RECIPIENTS
+    if plan.over_limit and enforce_cap:
         raise RecipientError(
             "too_many_recipients",
             f"the reply would go to more than {MAX_RECIPIENTS} addresses; answer with "

@@ -1,6 +1,6 @@
 # `manage draft`: reply to everyone by default
 
-Status: built in 0.6.0. Quoting the answered mail below the reply is a second, separate change.
+Status: pull request 70 (0.6.0), not merged. Quoting the answered mail below the reply is a second, separate change.
 
 ## Decisions
 
@@ -27,8 +27,9 @@ The recipients of a reply come from the answered mail, and its sender controls e
 5. **The owner's own mail:** when the main recipient is the owner, the reply goes to that mail's To instead of back to the owner. This also holds with `--sender-only`.
 6. **Unusable addresses** (anything that is not one bare ASCII address after parsing) are left out with a warning that gives their count, never the value. An unusable sender keeps its own warning.
 7. **Dropping every To recipient** moves the first Cc up into To.
-8. **More than 10** after drops: refused with `too_many_recipients`, never truncated. Same limit as `manage compose`.
-9. **Writing:** To and Cc are set as address objects and read back (`headers.set_addresses`), the same two locks `manage compose` uses. The command's output reports `to` and `cc` read back from the built draft.
+8. **More than 10** after drops: the write is refused with `too_many_recipients`, never truncated. Same limit as `manage compose`. The preview lists everyone and sets `over_limit`, so the user can see whom to leave out.
+9. **Dropping every recipient** is refused with `no_recipient_left`: a draft without a recipient reads like a finished one.
+10. **Writing:** To and Cc are set as address objects and read back (`headers.set_addresses`), the same two locks `manage compose` uses. The command's output reports `to` and `cc` read back from the built draft.
 
 ## Output change
 
