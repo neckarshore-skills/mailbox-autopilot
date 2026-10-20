@@ -246,29 +246,71 @@ def test_config_rename_to_existing_fails(cfg_env):
     assert "duplicate_alias" in r.output
 
 
-def test_config_remove_also_clears_keychain(cfg_env, monkeypatch):
+@pytest.fixture
+def two_accounts(cfg_env, monkeypatch):
+    """Two aliases; Keychain deletions are recorded instead of performed."""
     save_config(
         Config(
             default="work",
             accounts=(
-                Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-                Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+                Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+                Account(alias="private", email="c@d.example", server="imap.ionos.de"),
             ),
         )
     )
     deleted = []
+    monkeypatch.setattr(
+        "mailbox_cleanup.auth.keyring.delete_password", lambda s, k: deleted.append(k)
+    )
+    return deleted
 
-    def fake_delete(service, key):
-        deleted.append((service, key))
 
-    monkeypatch.setattr("mailbox_cleanup.auth.keyring.delete_password", fake_delete)
+def test_config_remove_keeps_the_keychain_entry_by_default(two_accounts):
+    """#75: removing an alias no longer destroys the credential."""
+    r = CliRunner().invoke(cli, ["config", "remove", "private"])
+    assert r.exit_code == 0, r.output
+    assert [a.alias for a in load_config().accounts] == ["work"]
+    assert two_accounts == []
+    assert "kept" in r.output.lower()
+    assert "--delete-credentials" in r.output
 
-    runner = CliRunner()
-    r = runner.invoke(cli, ["config", "remove", "private"])
-    assert r.exit_code == 0
-    cfg = load_config()
-    assert [a.alias for a in cfg.accounts] == ["work"]
-    assert any("c@d.de" in str(k) for _, k in deleted)
+
+def test_config_remove_deletes_credentials_only_when_asked_and_confirmed(two_accounts):
+    r = CliRunner().invoke(
+        cli, ["config", "remove", "private", "--delete-credentials"], input="y\n"
+    )
+    assert r.exit_code == 0, r.output
+    assert [a.alias for a in load_config().accounts] == ["work"]
+    assert any("c@d.example" in str(k) for k in two_accounts)
+
+
+def test_config_remove_declined_confirmation_changes_nothing(two_accounts):
+    r = CliRunner().invoke(
+        cli, ["config", "remove", "private", "--delete-credentials"], input="n\n"
+    )
+    assert r.exit_code != 0
+    assert [a.alias for a in load_config().accounts] == ["work", "private"]
+    assert two_accounts == []
+
+
+def test_config_remove_without_a_terminal_answer_changes_nothing(two_accounts):
+    """Claude's Bash has no stdin: EOF at the prompt must abort, not delete."""
+    r = CliRunner().invoke(cli, ["config", "remove", "private", "--delete-credentials"], input="")
+    assert r.exit_code != 0
+    assert [a.alias for a in load_config().accounts] == ["work", "private"]
+    assert two_accounts == []
+
+
+def test_config_remove_refuses_credential_deletion_non_interactively(two_accounts):
+    r = CliRunner().invoke(
+        cli,
+        ["config", "remove", "private", "--delete-credentials", "--non-interactive"],
+        input="y\n",
+    )
+    assert r.exit_code == 4, r.output
+    assert "confirmation_required" in r.output
+    assert [a.alias for a in load_config().accounts] == ["work", "private"]
+    assert two_accounts == []
 
 
 def test_config_remove_default_clears_default_field(cfg_env, monkeypatch):

@@ -1,6 +1,6 @@
 [project]
 name = "mailbox-autopilot"
-version = "0.7.2"
+version = "0.8.0"
 description = "Clean up an IMAP mailbox and draft replies. Never sends mail."
 requires-python = ">=3.11"
 license = "MIT"

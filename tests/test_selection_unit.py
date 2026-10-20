@@ -300,7 +300,7 @@ def test_cli_partial_failure_is_exit_5_and_logs_what_moved(cli_env):
     (rec,) = _records(cli_env.log)
     assert rec["result"] == "partial_failure"
     assert len(rec["affected_uids"]) == 500
-    assert rec["args"]["category"] == "newsletter"
+    assert rec["arg_keys"] == ["category"]
 
 
 def test_cli_several_senders_and_recipient_are_logged(cli_env):
@@ -318,8 +318,9 @@ def test_cli_several_senders_and_recipient_are_logged(cli_env):
     )  # fmt: skip
     assert res.exit_code == 0, res.output
     (rec,) = _records(cli_env.log)
-    assert rec["args"]["sender"] == ["news@a.example", "newsletter@c.example"]
-    assert rec["args"]["recipient"] == "alias@relay.example"
+    # #75: the names of the filters given, never their values
+    assert rec["arg_keys"] == ["recipient", "sender"]
+    assert "example" not in json.dumps(rec)
     assert rec["result"] == "success"
 
 

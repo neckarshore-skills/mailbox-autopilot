@@ -8,7 +8,7 @@ from dataclasses import replace as dc_replace
 import click
 
 from . import SCHEMA_VERSION
-from .audit import log_action
+from .audit import log_action, repair_permissions
 from .auth import (
     AuthMissingError,
     delete_credentials,
@@ -84,6 +84,12 @@ def _fail(payload: dict, exit_code: int, json_mode: bool) -> None:
 @click.version_option(package_name="mailbox-autopilot")
 def cli():
     """Clean up an IMAP mailbox and draft replies. Never sends mail."""
+    try:
+        repair_permissions()  # #75: a log from an older version is 0644
+    except OSError as e:
+        # Not fatal: the command itself does not depend on it. Said on stderr, so a
+        # --json payload on stdout stays parseable.
+        click.echo(f"warning: could not tighten the audit log's permissions: {e}", err=True)
 
 
 @cli.group()
@@ -369,8 +375,20 @@ def config_rename(old_alias: str, new_alias: str):
 
 @config_group.command("remove")
 @click.argument("alias")
-def config_remove(alias: str):
-    """Remove an account from config and delete its Keychain password."""
+@click.option(
+    "--delete-credentials",
+    "delete_creds",
+    is_flag=True,
+    help="Also delete the Keychain password. Asks for confirmation.",
+)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    help="Never prompt. Refuses --delete-credentials, which needs a confirmation.",
+)
+def config_remove(alias: str, delete_creds: bool, non_interactive: bool):
+    """Remove an account alias from config. The Keychain password stays (#75)
+    unless --delete-credentials is given and confirmed."""
     cfg = load_config()
     target = next((a for a in cfg.accounts if a.alias == alias), None)
     if target is None:
@@ -380,11 +398,37 @@ def config_remove(alias: str):
             json_mode=False,
         )
         return
+    if delete_creds:
+        # Every refusal and an unconfirmed prompt leave config and Keychain untouched.
+        if non_interactive:
+            _fail(
+                {
+                    "error_code": "confirmation_required",
+                    "message": "--delete-credentials needs an interactive confirmation; "
+                    "nothing was changed",
+                },
+                4,
+                json_mode=False,
+            )
+            return
+        # Two aliases cannot share an email (validate_config: duplicate email), so the
+        # Keychain entry, keyed by email, belongs to this alias alone.
+        click.confirm(
+            f"Delete the Keychain password for {target.email}? This cannot be undone.",
+            default=False,
+            abort=True,  # "n" and EOF (no terminal, e.g. Claude's Bash) both abort
+        )
     new_accounts = tuple(a for a in cfg.accounts if a.alias != alias)
     new_default = cfg.default if cfg.default != alias else None
     save_config(Config(default=new_default, accounts=new_accounts))
-    delete_credentials(target.email)
-    click.echo(f"Removed account {alias} ({target.email}).")
+    if delete_creds:
+        delete_credentials(target.email)
+        click.echo(f"Removed account {alias} ({target.email}) and its Keychain password.")
+    else:
+        click.echo(
+            f"Removed account {alias} ({target.email}). The Keychain password was kept; "
+            f"delete it with --delete-credentials."
+        )
 
 
 @config_group.group("keep")
@@ -616,7 +660,10 @@ def _selection_args(sender, subject_contains, older_than, recipient, category, k
 
 def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args, run, text_target):
     """Shared body of delete and move: run, map errors to exit codes, audit, emit."""
-    # The audit log has to explain why a mail survived: record the account's list too.
+    # The audit log has to explain why a mail survived: record the account's list too
+    # (since #75 as its length). A move's target is a destination, not a filter value:
+    # it stays in the record, because it says where the mail went.
+    target_folder = args.pop("to", None)
     args = {**args, "keep_config": list(account[0].keep)}
     try:
         with imap_connect(account[1], port=account[0].port) as mb:
@@ -639,6 +686,7 @@ def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args
             account=account[0].alias,
             args=args,
             folder=folder,
+            target_folder=target_folder,
             affected_uids=e.moved,
             result="partial_failure",
             error=type(e.cause).__name__,
@@ -684,6 +732,7 @@ def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args
             account=account[0].alias,
             args=args,
             folder=folder,
+            target_folder=target_folder,
             affected_uids=res.affected_uids,
             result="success",
         )

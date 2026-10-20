@@ -259,8 +259,10 @@ def test_delete_flag_and_config_lists_add_up(keep_env):
     assert out["kept_by_config"] == 1
     assert mb.moves == [(["1"], "Trash")]
     (rec,) = [json.loads(x) for x in keep_env.log.read_text().splitlines()]
-    assert rec["args"]["keep"] == ["letters@shop.example"]
-    assert rec["args"]["keep_config"] == ["@bank.example"]
+    # #75: names and the list's length, never the addresses
+    assert "keep" in rec["arg_keys"]
+    assert rec["keep_config_count"] == 1
+    assert "example" not in json.dumps(rec)
 
 
 def test_move_keeps_senders_on_the_account_list(keep_env):
@@ -350,4 +352,47 @@ def test_unsubscribe_of_a_kept_sender_says_so_and_logs_no_success(keep_env, monk
     (rec,) = [json.loads(x) for x in keep_env.log.read_text().splitlines()]
     assert rec["result"] == "kept"
     assert rec["affected_uids"] == []
-    assert rec["args"]["keep_config"] == ["@bank.example"]
+    assert rec["keep_config_count"] == 1  # #75: the length, not the list
+
+
+# --- #75: no filter value reaches the audit log ------------------------------------
+
+_CANARY = "canary-7f3a@leak.example"
+_CANARY_SUBJECT = "canary-subject-91c2"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["delete", "--sender", _CANARY, "--subject-contains", _CANARY_SUBJECT],
+        ["move", "--to", "Archiv", "--sender", _CANARY, "--subject-contains", _CANARY_SUBJECT],
+    ],
+    ids=["delete", "move"],
+)
+def test_cleanup_logs_no_filter_value(keep_env, argv):
+    keep_env.use(_MB([_msg(1, _CANARY, subject=_CANARY_SUBJECT)]), keep=["@kept.example"])
+    r = CliRunner().invoke(cli, [*argv, "--keep", "other@kept.example", "--apply", "--json"])
+    assert r.exit_code == 0, r.output
+    text = keep_env.log.read_text()
+    assert text.strip(), "no audit record written — the check would be vacuous"
+    for value in (_CANARY, _CANARY_SUBJECT, "kept.example"):
+        assert value not in text
+    (rec,) = [json.loads(x) for x in text.splitlines()]
+    assert rec["arg_keys"] == ["keep", "sender", "subject_contains"]
+    assert rec["affected_uids"] == ["1"]
+    # where the mail went stays readable: a destination, not a filter value
+    assert rec.get("target_folder") == ("Archiv" if argv[0] == "move" else None)
+
+
+def test_unsubscribe_logs_no_sender(keep_env, monkeypatch):
+    msgs = [_msg(1, _CANARY, {"List-Unsubscribe": ("<https://leak.example/u>",)})]
+    keep_env.use(_MB(msgs), keep=[])
+    monkeypatch.setattr(ccli, "perform_unsubscribe", lambda a: (True, "ok"))
+    r = CliRunner().invoke(cli, ["unsubscribe", "--sender", _CANARY, "--apply"])
+    assert r.exit_code == 0, r.output
+    text = keep_env.log.read_text()
+    assert text.strip(), "no audit record written — the check would be vacuous"
+    assert "leak.example" not in text
+    (rec,) = [json.loads(x) for x in text.splitlines()]
+    assert rec["arg_keys"] == ["sender"]
+    assert rec["keep_config_count"] == 0
