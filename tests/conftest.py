@@ -12,6 +12,18 @@ COMPOSE_FILE = Path(__file__).parent / "docker-compose.test.yml"
 IMAP_PORT = 3143  # Greenmail plain IMAP
 
 
+@pytest.fixture(autouse=True)
+def _isolated_audit_log(tmp_path, monkeypatch):
+    """No test reaches the real ~/.mailbox-cleanup. Since #75 every CLI start tightens
+    the audit log's modes, so a test that invoked the CLI without an override changed
+    the developer's real directory (observed on the M2, 2026-10-20). Subprocess tests
+    inherit the env var. A test that needs the default location overrides both."""
+    from mailbox_cleanup import audit
+
+    monkeypatch.setenv(audit.AUDIT_LOG_PATH_ENV, str(tmp_path / "audit-isolated.log"))
+    monkeypatch.setattr(audit, "DEFAULT_AUDIT_LOG", tmp_path / "home" / "audit.log")
+
+
 def _imap_ready(host: str, port: int, timeout: float = 2.0) -> bool:
     """Greenmail opens the TCP port before the IMAP listener is fully up.
     Verify by reading the IMAP greeting line."""
