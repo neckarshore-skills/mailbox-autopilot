@@ -65,14 +65,40 @@ def test_tls_context_verifies_certificate_and_hostname(boxes, monkeypatch):
     assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
+# Hosts that look like loopback, or contain a loopback name, but are not (James on #78).
+# A loosened check -- substring, prefix, or resolving DNS -- must fail one of these.
+NOT_LOOPBACK = [
+    "imap.example.com",
+    "localhost.evil.com",
+    "127.0.0.1.nip.io",
+    "localtest.me",
+    "0.0.0.0",
+    "[::1]",
+    "localhost.",
+]
+
+
+@pytest.mark.parametrize("host", NOT_LOOPBACK)
 @pytest.mark.parametrize("ssl_flag", [None, False])
-def test_plaintext_to_a_remote_server_is_refused(boxes, monkeypatch, ssl_flag):
+def test_plaintext_to_a_remote_server_is_refused(boxes, monkeypatch, ssl_flag, host):
     monkeypatch.setenv("MAILBOX_CLEANUP_SSL", "0")
     tls, plain = boxes
+    creds = Credentials(email="t@example.com", password="x", server=host)
     with pytest.raises(InsecureConnectionRefused):
-        with imap_connect(REMOTE, ssl=ssl_flag):
+        with imap_connect(creds, ssl=ssl_flag):
             pass
     assert plain.built == [] and tls.built == []
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_loopback_without_the_flag_still_uses_tls(boxes, monkeypatch, host):
+    """Loopback alone never unlocks plaintext: it takes the flag AND a loopback host."""
+    monkeypatch.delenv("MAILBOX_CLEANUP_SSL", raising=False)
+    tls, plain = boxes
+    creds = Credentials(email="t@example.com", password="x", server=host)
+    with imap_connect(creds):
+        pass
+    assert len(tls.built) == 1 and plain.built == []
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
@@ -150,6 +176,9 @@ def self_signed_server(tmp_path):
                 conn, _ = sock.accept()
             except OSError:
                 return
+            # Without this, a plaintext client and this TLS server wait on each other
+            # forever and a regression hangs CI instead of failing it (James on #78).
+            conn.settimeout(5)
             try:
                 with server_ctx.wrap_socket(conn, server_side=True) as tls:
                     handshakes.append(True)
