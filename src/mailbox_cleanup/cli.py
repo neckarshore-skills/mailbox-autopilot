@@ -34,7 +34,12 @@ from .manage.args import unsafe_arg_keys
 from .manage.cli import manage as _manage_group
 from .operations.archive import run_archive
 from .operations.attachments import run_attachments
-from .operations.batching import PartialMoveError, move_in_batches
+from .operations.batching import (
+    MoveUnsupportedError,
+    PartialMoveError,
+    ensure_scoped_move,
+    move_in_batches,
+)
 from .operations.bounces import run_bounces
 from .operations.dedupe import run_dedupe
 from .operations.delete import PreviewMismatchError, run_delete
@@ -649,6 +654,9 @@ def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args
             json_mode,
         )
         return
+    except MoveUnsupportedError as e:
+        _fail({"error_code": "move_unsupported", "message": str(e)}, 5, json_mode)
+        return
     except ValueError as e:
         _fail({"error_code": "bad_args", "message": str(e)}, 4, json_mode)
         return
@@ -1005,6 +1013,10 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
             if not https_actions:
                 manual = [a["target"] for a in actions if a["kind"] == "mailto"]
             if apply:
+                if uids:
+                    # Before any external request: a refused move after a sent unsubscribe
+                    # would leave an unaudited action and repeat it on a re-run (James #79).
+                    ensure_scoped_move(mb)
                 if https_actions:
                     first = https_actions[0]
                     a = UnsubAction(**{k: first[k] for k in ("kind", "target", "one_click")})
@@ -1026,6 +1038,9 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
                     trash = resolve_folder(mb, "trash")
                     if trash and uids:
                         move_in_batches(mb, uids, trash)
+    except MoveUnsupportedError as e:
+        _fail({"error_code": "move_unsupported", "message": str(e)}, 5, json_mode)
+        return
     except Exception as e:
         _fail({"error_code": "operation_error", "message": str(e)}, 2, json_mode)
         return

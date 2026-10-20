@@ -18,6 +18,7 @@ from mailbox_cleanup.operations.delete import PreviewMismatchError, run_delete
 from mailbox_cleanup.operations.filters import build_imap_search
 from mailbox_cleanup.operations.move import run_move
 from mailbox_cleanup.operations.selection import parse_keep, select_messages
+from tests._imap_fakes import move_capable_client
 
 NL = {"List-Unsubscribe": ("<https://example.com/u>",)}
 
@@ -40,6 +41,7 @@ class FakeMailbox:
         self.moves = []
         self.fetch_limits = []
         self._fail_on_call = fail_on_call
+        self.client = move_capable_client(self)  # #73/#79
         self.folder = SimpleNamespace(set=lambda name: None, list=lambda: [])
 
     def fetch(self, criteria, headers_only, mark_seen, limit, bulk):
@@ -329,3 +331,14 @@ def test_cli_move_accepts_the_new_filters(cli_env):
     )
     assert res.exit_code == 0, res.output
     assert mb.moves[0][1] == "Archiv"
+
+
+def test_cli_server_without_move_or_uidplus_is_exit_5_and_moves_nothing(cli_env):
+    """#73: a move that cannot be scoped to our UIDs is refused, and nothing is touched."""
+    mb = TrashMailbox(_mixed())
+    mb.client = SimpleNamespace(capabilities=("IMAP4REV1",))
+    cli_env.use(mb)
+    res = CliRunner().invoke(cli, ["delete", "--category", "newsletter", "--apply", "--json"])
+    assert res.exit_code == 5, res.output
+    assert json.loads(res.output)["error_code"] == "move_unsupported"
+    assert mb.moves == []

@@ -1,6 +1,7 @@
 import json
 import socket
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +17,7 @@ from mailbox_cleanup.operations.unsubscribe import (
     perform_unsubscribe,
     validate_egress_url,
 )
+from tests._imap_fakes import move_capable_client
 
 
 def _addrinfo(ip: str, port: int = 443):
@@ -173,6 +175,9 @@ def _run_apply(monkeypatch, actions, flags=("--apply", "--json"), exit_code=0):
     audit = []
 
     class _MB:
+        def __init__(self):
+            self.client = move_capable_client(self)  # #73/#79
+
         def move(self, uids, folder):
             moved.append((tuple(uids), folder))
 
@@ -366,3 +371,44 @@ def test_dry_run_mailto_only_text_output_does_not_promise_an_attempt(monkeypatch
     out, _, _ = _run_apply(monkeypatch, MAILTO_ONLY, flags=())
     assert "Would attempt" not in out
     assert "unsub@example.com" in out
+
+
+def test_apply_on_a_server_without_move_or_uidplus_sends_no_unsubscribe(monkeypatch):
+    """James #79 finding 2: refuse BEFORE the external HTTPS request, not after it."""
+    sent = []
+    monkeypatch.setattr(cli_mod, "perform_unsubscribe", lambda a: sent.append(a) or (True, "ok"))
+
+    class _Plain:
+        client = SimpleNamespace(capabilities=("IMAP4REV1",))
+
+        def move(self, uids, folder):  # pragma: no cover - must never run
+            raise AssertionError("moved on a server that cannot scope a move")
+
+    @contextmanager
+    def _fake_connect(creds, port=993):
+        yield _Plain()
+
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_account_and_credentials",
+        lambda **kw: (
+            Account(alias="t", email="t@example.com", server="imap.example.com"),
+            Credentials(email="t@example.com", password="x", server="imap.example.com"),
+        ),
+    )
+    monkeypatch.setattr(cli_mod, "imap_connect", _fake_connect)
+    monkeypatch.setattr(
+        cli_mod,
+        "collect_unsub_targets",
+        lambda mb, sender, folder, keep=(): {
+            "uids": ["7"],
+            "actions": [{"kind": "https", "target": "https://example.com/u", "one_click": True}],
+        },
+    )
+    monkeypatch.setattr(cli_mod, "resolve_folder", lambda mb, kind: "Trash")
+    res = CliRunner().invoke(
+        cli_mod.cli, ["unsubscribe", "--sender", "news@example.com", "--apply", "--json"]
+    )
+    assert res.exit_code == 5, res.output
+    assert json.loads(res.output)["error_code"] == "move_unsupported"
+    assert sent == []

@@ -1,6 +1,6 @@
 {
   "name": "mailbox-autopilot",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Clean up an IMAP mailbox and draft replies and new mail into Drafts. Never sends mail.",
   "author": { "name": "Neckarshore AI", "url": "https://neckarshore.ai" },
   "repository": "https://github.com/neckarshore-skills/mailbox-autopilot",
