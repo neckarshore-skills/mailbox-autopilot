@@ -18,7 +18,7 @@ class _Box:
     logouts = 0
     fail_logins = 0
 
-    def __init__(self, server, port):
+    def __init__(self, server, port, **kwargs):  # kwargs: ssl_context since the TLS fix
         pass
 
     def login(self, email, password):
