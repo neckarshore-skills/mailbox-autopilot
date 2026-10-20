@@ -336,6 +336,7 @@ The CLI exits with a numeric code; structured errors include a stable `error` st
 | `unsubscribe_failed` | `unsubscribe --apply`: the HTTPS unsubscribe failed; no mail was moved (since 0.4.1) | 5 |
 | `bad_config` | The config file cannot be used (for example a keep entry that is neither an address nor `@domain`); nothing connects (since 0.5.0) | 4 |
 | `not_in_keep_list` | `config keep remove`: the entry is not on that account's list; nothing changed (since 0.5.0) | 4 |
+| `move_unsupported` | `delete` / `move --apply`: the server offers neither IMAP MOVE nor UIDPLUS, so a move could remove messages outside the selection; nothing was moved (since 0.7.2) | 5 |
 
 Generic exit codes:
 

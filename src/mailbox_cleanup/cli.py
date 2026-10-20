@@ -34,7 +34,7 @@ from .manage.args import unsafe_arg_keys
 from .manage.cli import manage as _manage_group
 from .operations.archive import run_archive
 from .operations.attachments import run_attachments
-from .operations.batching import PartialMoveError, move_in_batches
+from .operations.batching import MoveUnsupportedError, PartialMoveError, move_in_batches
 from .operations.bounces import run_bounces
 from .operations.dedupe import run_dedupe
 from .operations.delete import PreviewMismatchError, run_delete
@@ -648,6 +648,9 @@ def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args
             5,
             json_mode,
         )
+        return
+    except MoveUnsupportedError as e:
+        _fail({"error_code": "move_unsupported", "message": str(e)}, 5, json_mode)
         return
     except ValueError as e:
         _fail({"error_code": "bad_args", "message": str(e)}, 4, json_mode)

@@ -182,6 +182,7 @@ class _MB:
     def __init__(self, msgs):
         self._msgs = msgs
         self.moves = []
+        self.client = SimpleNamespace(capabilities=("MOVE",))  # #73
         self.folder = SimpleNamespace(
             set=lambda name: None,
             list=lambda: [SimpleNamespace(name="Trash", flags=("\\Trash",), delim="/")],

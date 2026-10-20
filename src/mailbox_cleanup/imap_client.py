@@ -9,6 +9,25 @@ from .auth import Credentials
 SSL_ENV = "MAILBOX_CLEANUP_SSL"  # set to "0" to disable SSL (used by Greenmail tests)
 
 
+def _refresh_capabilities(mb) -> None:
+    """Replace the pre-login capability list with the one the server sends after login.
+
+    imaplib keeps what the greeting announced; some servers (Hostinger) add MOVE and
+    UIDPLUS only after authentication, and imap_tools decides on MOVE from that list.
+    On failure the old list stays, and batching refuses a move it cannot scope (#73).
+    """
+    client = getattr(mb, "client", None)
+    if client is None:
+        return
+    try:
+        typ, data = client.capability()
+    except Exception:
+        return
+    if typ == "OK" and data and data[-1]:
+        raw = data[-1].decode() if isinstance(data[-1], bytes) else str(data[-1])
+        client.capabilities = tuple(raw.upper().split())
+
+
 class IMAPConnectionError(Exception):
     pass
 
@@ -42,6 +61,7 @@ def imap_connect(
             raise IMAPConnectionError(
                 f"Failed to connect to {creds.server}:{port} as {creds.email}: {e}"
             ) from e
+    _refresh_capabilities(mb)
     try:
         yield mb
     finally:

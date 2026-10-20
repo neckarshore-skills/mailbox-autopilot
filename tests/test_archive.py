@@ -15,6 +15,7 @@ def _msg(uid, year):
 
 def test_archive_groups_by_year_and_moves():
     mb = MagicMock()
+    mb.client.capabilities = ("MOVE",)  # #73: batching reads the capability list
     mb.fetch.return_value = [_msg("1", 2023), _msg("2", 2023), _msg("3", 2024)]
     # SPECIAL-USE detection: pretend Archive exists as plain folder
     archive_folder = MagicMock()
@@ -48,6 +49,7 @@ def test_archive_groups_by_year_and_moves():
 
 def test_archive_dry_run_does_not_create_or_move():
     mb = MagicMock()
+    mb.client.capabilities = ("MOVE",)  # #73: batching reads the capability list
     mb.fetch.return_value = [_msg("1", 2023)]
     archive_folder = MagicMock()
     archive_folder.name = "Archive"

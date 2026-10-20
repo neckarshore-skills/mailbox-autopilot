@@ -1,6 +1,7 @@
 import json
 import socket
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -173,6 +174,8 @@ def _run_apply(monkeypatch, actions, flags=("--apply", "--json"), exit_code=0):
     audit = []
 
     class _MB:
+        client = SimpleNamespace(capabilities=("MOVE",))  # #73
+
         def move(self, uids, folder):
             moved.append((tuple(uids), folder))
 
