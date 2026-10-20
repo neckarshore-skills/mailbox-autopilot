@@ -19,6 +19,13 @@ password from your local environment/config. Credentials are used only to open
 the IMAP connection you configured; they are never logged, transmitted to any
 third party, or committed.
 
+**The IMAP server must prove who it is (since 0.7.1).** The connection is IMAPS
+with the server certificate and hostname verified against the system trust store,
+TLS 1.2 or newer. A server whose certificate does not verify is refused, without
+retry, as `connection_error`. Plaintext IMAP exists only for a loopback test server
+(`MAILBOX_CLEANUP_SSL=0` with `127.0.0.1`/`localhost`); for any other host it is
+refused.
+
 **Network egress.** Two kinds of outbound connection exist: (1) the IMAP (and,
 for `mailto:` unsubscribe, SMTP) server you configure; (2) when you run
 `unsubscribe`, an HTTP(S) request to the `List-Unsubscribe` URL published by the
