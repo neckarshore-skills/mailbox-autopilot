@@ -27,6 +27,7 @@ from mailbox_cleanup.config import (
 )
 from mailbox_cleanup.operations.bounces import run_bounces
 from mailbox_cleanup.operations.unsubscribe import collect_unsub_targets
+from tests._imap_fakes import move_capable_client
 
 NL = {"List-Unsubscribe": ("<https://example.com/u>",)}
 
@@ -182,7 +183,7 @@ class _MB:
     def __init__(self, msgs):
         self._msgs = msgs
         self.moves = []
-        self.client = SimpleNamespace(capabilities=("MOVE",))  # #73
+        self.client = move_capable_client(self)  # #73/#79
         self.folder = SimpleNamespace(
             set=lambda name: None,
             list=lambda: [SimpleNamespace(name="Trash", flags=("\\Trash",), delim="/")],

@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 authors = [{name = "German Rauhut", email = "german@rauhut.com"}]
 dependencies = [
     "click>=8.1",
-    "imap-tools>=1.5",
+    "imap-tools==1.12.1",
     "keyring>=24.0",
     "pyyaml>=6.0.3",
     "requests>=2.31",

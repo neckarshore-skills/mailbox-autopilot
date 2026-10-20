@@ -18,6 +18,7 @@ from mailbox_cleanup.operations.delete import PreviewMismatchError, run_delete
 from mailbox_cleanup.operations.filters import build_imap_search
 from mailbox_cleanup.operations.move import run_move
 from mailbox_cleanup.operations.selection import parse_keep, select_messages
+from tests._imap_fakes import move_capable_client
 
 NL = {"List-Unsubscribe": ("<https://example.com/u>",)}
 
@@ -40,7 +41,7 @@ class FakeMailbox:
         self.moves = []
         self.fetch_limits = []
         self._fail_on_call = fail_on_call
-        self.client = SimpleNamespace(capabilities=("MOVE",))  # #73
+        self.client = move_capable_client(self)  # #73/#79
         self.folder = SimpleNamespace(set=lambda name: None, list=lambda: [])
 
     def fetch(self, criteria, headers_only, mark_seen, limit, bulk):

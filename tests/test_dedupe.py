@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from mailbox_cleanup.operations.dedupe import run_dedupe
+from tests._imap_fakes import move_capable_client
 
 
 def _msg(uid, mid, date):
@@ -16,7 +17,7 @@ def _msg(uid, mid, date):
 
 def test_dedupe_keeps_oldest_drops_rest(monkeypatch):
     mb = MagicMock()
-    mb.client.capabilities = ("MOVE",)  # #73: batching reads the capability list
+    mb.client = move_capable_client(mb)  # #73/#79: UID MOVE goes through the client
     mb.fetch.return_value = [
         _msg("1", "<dup@x>", datetime(2025, 1, 1, tzinfo=UTC)),
         _msg("2", "<dup@x>", datetime(2025, 1, 2, tzinfo=UTC)),
@@ -41,7 +42,7 @@ def test_dedupe_keeps_oldest_drops_rest(monkeypatch):
 
 def test_dedupe_dry_run_does_not_move():
     mb = MagicMock()
-    mb.client.capabilities = ("MOVE",)  # #73: batching reads the capability list
+    mb.client = move_capable_client(mb)  # #73/#79: UID MOVE goes through the client
     mb.fetch.return_value = [
         _msg("1", "<dup@x>", datetime(2025, 1, 1, tzinfo=UTC)),
         _msg("2", "<dup@x>", datetime(2025, 1, 2, tzinfo=UTC)),

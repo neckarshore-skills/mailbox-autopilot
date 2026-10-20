@@ -49,18 +49,27 @@ class CapMailbox:
 def test_native_move_when_the_server_has_move():
     mb = CapMailbox(["IMAP4REV1", "MOVE", "UIDPLUS"])
     move_in_batches(mb, ["3", "4"], "Trash")
-    assert mb.calls == [("move", ["3", "4"], "Trash")]
+    # sent by us, never via imap_tools' MailBox.move(), which would decide again
+    assert mb.calls == [("uid", "MOVE", "3,4", b'"Trash"')]
+
+
+@pytest.mark.parametrize("caps", [["imap4rev1", "move"], [b"IMAP4rev1", b"Move"]])
+def test_lowercase_or_bytes_move_still_takes_the_native_path(caps):
+    """James #79 P4: one decision on a normalised list, so case cannot flip the path."""
+    mb = CapMailbox(caps)
+    move_in_batches(mb, ["5"], "Trash")
+    assert mb.calls == [("uid", "MOVE", "5", b'"Trash"')]
 
 
 def test_without_move_only_our_uids_are_expunged():
     mb = CapMailbox(["IMAP4REV1", "UIDPLUS"])
     moved = move_in_batches(mb, ["3", "4"], "Archive")
     assert moved == ["3", "4"]
-    assert ("copy", ["3", "4"], "Archive") in mb.calls
+    assert ("uid", "COPY", "3,4", b'"Archive"') in mb.calls
     assert ("uid", "STORE", "3,4", "+FLAGS.SILENT", r"(\Deleted)") in mb.calls
     assert ("uid", "EXPUNGE", "3,4") in mb.calls
     assert ("plain-expunge",) not in mb.calls
-    assert not any(c[0] in ("move", "delete") for c in mb.calls)
+    assert not any(c[0] in ("move", "copy", "delete") for c in mb.calls)
 
 
 def test_without_move_and_uidplus_nothing_is_touched():
