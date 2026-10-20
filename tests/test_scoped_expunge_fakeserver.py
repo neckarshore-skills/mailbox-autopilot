@@ -14,7 +14,11 @@ import pytest
 
 from mailbox_cleanup.auth import Credentials
 from mailbox_cleanup.imap_client import imap_connect
-from mailbox_cleanup.operations.batching import MoveUnsupportedError, move_in_batches
+from mailbox_cleanup.operations.batching import (
+    MoveUnsupportedError,
+    PartialMoveError,
+    move_in_batches,
+)
 
 PRE_LOGIN = "IMAP4rev1 AUTH=PLAIN"
 DELETED = "\\Deleted"
@@ -23,8 +27,9 @@ DELETED = "\\Deleted"
 class FakeIMAP:
     """Just enough IMAP4rev1 for login, SELECT and the move commands. One connection."""
 
-    def __init__(self, post_login_caps: str):
+    def __init__(self, post_login_caps: str, refuse: frozenset[str] = frozenset()):
         self.post = post_login_caps
+        self.refuse = refuse  # UID subcommands answered with NO and not executed
         self.folders = {"INBOX": {1: set(), 2: set(), 3: set(), 4: {DELETED}}, "Trash": {}}
         self.selected = None
         self.after_select: list[str] = []
@@ -75,6 +80,8 @@ class FakeIMAP:
             self.after_select.append(f"UID {sub}")
             box = self.folders[self.selected]
             caps = self.post.upper().split()
+            if sub in self.refuse:
+                return [f"{tag} NO [CANNOT] {sub} refused by test"]
             if sub == "MOVE" and "MOVE" in caps:
                 spec, target = args.split(" ", 1)
                 target = target.strip('"')
@@ -169,3 +176,27 @@ def test_neither_move_nor_uidplus_sends_nothing_after_select(monkeypatch):
     assert server.after_select == []
     assert set(server.folders["INBOX"]) == {1, 2, 3, 4}
     assert server.folders["Trash"] == {}
+
+
+@pytest.mark.parametrize(
+    ("post_login", "refused"),
+    [
+        ("IMAP4rev1 MOVE UIDPLUS", "MOVE"),
+        ("IMAP4rev1 UIDPLUS", "COPY"),
+        ("IMAP4rev1 UIDPLUS", "STORE"),
+    ],
+    ids=["move-NO", "copy-NO", "store-NO"],
+)
+def test_a_NO_answer_stops_the_batch_before_anything_is_removed(monkeypatch, post_login, refused):
+    """James on b0ffe03: an unchecked NO to COPY would still run STORE + UID EXPUNGE --
+    UIDs gone, Trash empty, reported as ok. Every step's result is checked."""
+    server = FakeIMAP(post_login, refuse=frozenset({refused}))
+    with pytest.raises(PartialMoveError) as exc:
+        with _connect(server, monkeypatch) as mb:
+            move_in_batches(mb, ["1", "2"], "Trash")
+    server.thread.join(5)
+    assert exc.value.moved == [] and exc.value.remaining == ["1", "2"]
+    inbox = server.folders["INBOX"]
+    assert {1, 2, 3, 4} <= set(inbox), "a refused step still removed messages"
+    assert "UID EXPUNGE" not in server.after_select
+    assert "EXPUNGE" not in server.after_select
