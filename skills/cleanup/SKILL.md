@@ -137,7 +137,7 @@ Replace `<ACCOUNT>` with the chosen alias (or omit the `--account` flag when onl
 
 ## Audit log
 
-Path: `~/.mailbox-cleanup/audit.log`. Append-only JSONL, one record per `--apply` action. Each record now includes an `account` field identifying which alias performed the action. Treat `account` as **optional** for backward compatibility — v0.1 entries pre-date the multi-account schema and may not have it.
+Path: `~/.mailbox-cleanup/audit.log`. JSONL, one record per `--apply` action, owner-only (0600). Since 0.8.0 it rotates at 5 MB and keeps five rotated files (`audit.log.1` to `.5`), and a record names the arguments given (`arg_keys`), never their values: to answer "which sender did I delete?", use the affected UIDs and the mailbox, not the log. Each record includes an `account` field identifying which alias performed the action. Treat `account` as **optional** for backward compatibility — v0.1 entries pre-date the multi-account schema and may not have it.
 
 ## When the CLI isn't enough — stop and report
 
@@ -188,7 +188,7 @@ afterwards that sender's mail can be deleted again.
 
 1. **Never call any subcommand with `--apply` without showing a dry-run preview first and getting explicit "ja" / "yes" / "apply" from the user.**
 2. **Never invent UID lists or counts.** Always use the JSON returned by the CLI.
-3. **Never edit the audit log.** It is append-only forensics.
+3. **Never edit the audit log.** Only the CLI appends to it and rotates it; it is forensics.
 4. **All destructive operations move to Trash.** v1 has no hard-delete; if the user asks "wirklich löschen", explain that v1 only soft-deletes and Trash is purged by the mail provider's retention.
 5. **Never mix accounts in a single dry-run/apply pair.** If the user switches account mid-session, re-run the preview against the new account before any `--apply`.
 6. **Never change messages outside the CLI.** No script moves, deletes or flags mail. If the CLI cannot do it, stop and report the gap (see "When the CLI isn't enough").

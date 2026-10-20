@@ -26,8 +26,16 @@ retry, as `connection_error`. Plaintext IMAP exists only for a loopback test ser
 (`MAILBOX_CLEANUP_SSL=0` with `127.0.0.1`/`localhost`); for any other host it is
 refused.
 
-**Network egress.** Two kinds of outbound connection exist: (1) the IMAP (and,
-for `mailto:` unsubscribe, SMTP) server you configure; (2) when you run
+**Audit log (since 0.8.0).** `~/.mailbox-cleanup/audit.log` is owner-only (file
+0600, directory 0700; a log from an older version is tightened on the next run of
+any command). It rotates at 5 MB and keeps five rotated files, so the oldest history
+is eventually dropped. Records carry the *names* of the arguments given, never their
+values: no addresses, subjects, bodies or keep-list entries. A move's target folder
+is recorded, because it says where the mail went.
+
+**Network egress.** Two kinds of outbound connection exist: (1) the IMAP server you
+configure. There is no SMTP connection of any kind: a `mailto:` unsubscribe is never
+executed, it is listed for you to handle by hand; (2) when you run
 `unsubscribe`, an HTTP(S) request to the `List-Unsubscribe` URL published by the
 sender. That URL is **email-controlled**, so the outbound request is gated by a
 fail-closed SSRF guard (`validate_egress_url` in `operations/unsubscribe.py`):
@@ -35,8 +43,8 @@ non-`http(s)` schemes and any host resolving to a private / loopback /
 link-local / reserved range (e.g. `127.0.0.1`, `169.254.169.254` cloud metadata,
 RFC-1918) are refused before any request is sent, all resolved addresses are
 checked (DNS-rebinding safe), and HTTP redirects are disabled so a permitted host
-cannot bounce the request onto an internal target. No IMAP/SMTP credentials are
-ever attached to that unsubscribe request.
+cannot bounce the request onto an internal target. No IMAP credentials are ever
+attached to that unsubscribe request.
 
 **No telemetry.** No analytics, error reporting, or auto-update calls are made.
 
@@ -46,9 +54,12 @@ mailbox you give it credentials for.
 
 ## Scope
 
-The tool operates only on the IMAP account and folders you configure. It does not
-read the local filesystem beyond its own config. Its only outbound calls are to
-the IMAP/SMTP server you specify and — during `unsubscribe` — to the sender's
+The tool operates only on the IMAP account and folders you configure. Beyond its
+own config and audit log it touches local files only where you name them: `manage`
+reads a body file you pass with `--body-file` (from its outbox, see `manage outbox`),
+and `manage save-attachment` writes one attachment to the file you name with `--out`,
+never overwriting. Its only outbound calls are to the IMAP server you specify
+and — during `unsubscribe` — to the sender's
 `List-Unsubscribe` URL, which is guarded against SSRF as described under
 **Data Handling → Network egress** above.
 

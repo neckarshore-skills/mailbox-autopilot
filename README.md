@@ -47,7 +47,7 @@ State files (per user):
 |------|---------|------|
 | `~/.mailbox-cleanup/config.json` | Identity + connection settings per account (source of truth) | 0600 |
 | macOS Keychain (service `mailbox-cleanup`) | Passwords only — one entry per email | OS-managed |
-| `~/.mailbox-cleanup/audit.log` | Append-only JSONL forensics, includes `account` field per record | 0644 |
+| `~/.mailbox-cleanup/audit.log` | JSONL forensics, includes `account` field per record; rotates at 5 MB, five rotated files kept (since 0.8.0) | 0600 (directory 0700) |
 
 ## Safety model
 
@@ -56,7 +56,7 @@ State files (per user):
 | **Default** | Every destructive subcommand is dry-run. `--apply` is required to actually do anything. |
 | **Soft-delete** | `delete` moves to `Papierkorb` / `Trash` (resolved via RFC 6154 SPECIAL-USE flag with literal fallbacks). No `EXPUNGE` in v1. |
 | **Skill flow** | Always shows a preview from a dry-run before re-running with `--apply`. Asks for explicit confirmation. |
-| **Audit log** | Every `--apply` action appends one JSON-line to `~/.mailbox-cleanup/audit.log` with timestamp, account, args, folder, affected UIDs, and result. |
+| **Audit log** | Every `--apply` action appends one JSON-line to `~/.mailbox-cleanup/audit.log` with timestamp, account, the names of the arguments given (never their values), folder, affected UIDs, and result. Owner-only (0600). |
 | **Credentials** | macOS Keychain via [`keyring`](https://github.com/jaraco/keyring). No `.env`, no plaintext. |
 | **Final step** | True deletion is manual — empty `Papierkorb` in IONOS Webmail. |
 
@@ -147,7 +147,8 @@ mailbox-autopilot config list --json         # machine-readable
 mailbox-autopilot config show work
 mailbox-autopilot config rename work office
 mailbox-autopilot config set-default office
-mailbox-autopilot config remove private      # also deletes Keychain password
+mailbox-autopilot config remove private      # keeps the Keychain password (since 0.8.0)
+mailbox-autopilot config remove private --delete-credentials   # asks, then deletes it too
 ```
 
 ## Usage
@@ -230,7 +231,7 @@ If only one account is configured, `--account` can be omitted.
 | `config show` | Show one account's connection settings | `<alias>` | n/a (read-only) |
 | `config rename` | Rename an alias | `<old>`, `<new>` | n/a |
 | `config set-default` | Mark an account as default | `<alias>` | n/a |
-| `config remove` | Delete account from config + remove Keychain password | `<alias>` | n/a |
+| `config remove` | Delete account from config; the Keychain password stays unless `--delete-credentials` is given and confirmed (since 0.8.0; refused with `--non-interactive`) | `<alias>` | n/a |
 | `config keep add` / `remove` / `list` | Keep list of one account: senders that `delete`, `move`, `unsubscribe` and `bounces` never touch (since 0.5.0) | entries (address or `@domain`); optional `--account=` | n/a |
 | `scan` | Discovery — classify INBOX, return JSON report | `--folder=INBOX` (default) | n/a (read-only) |
 | `senders` | List top-N senders by count | `--top=50` | n/a (read-only) |
@@ -303,12 +304,14 @@ Path: `~/.mailbox-cleanup/audit.log` (override with `MAILBOX_CLEANUP_AUDIT_LOG`)
 Format: one JSON object per line. The `account` field identifies which alias performed the action (optional for backward compatibility with v0.1 entries that pre-date multi-account). Example:
 
 ```json
-{"timestamp":"2026-05-04T09:27:45.504Z","account":"work","subcommand":"delete","args":{"sender":"service@paypal.de","older_than":"2m"},"folder":"INBOX","affected_uids":["655773","672257"],"result":"success"}
+{"timestamp":"2026-10-20T09:27:45.504Z","subcommand":"delete","account":"work","arg_keys":["older_than","sender"],"folder":"INBOX","affected_uids":["655773","672257"],"result":"success","keep_config_count":2}
 ```
 
-Fields: `timestamp` (UTC, ISO 8601), `account`, `subcommand` (a CLI subcommand name), `args` (the filter values; `manage.*` records carry `arg_keys` instead), `folder`, `affected_uids`, `result` — always a string: `success`, `partial_failure` or `error`; `unsubscribe` also writes `manual` (mailto-only, mail kept), `failed` (the HTTPS unsubscribe failed, mail kept) and `kept` (since 0.5.0: every matching message is from a sender on the account's keep list, nothing done), all with empty `affected_uids` — and `error` (an error code) when the action did not fully succeed.
+Fields: `timestamp` (UTC, ISO 8601), `account`, `subcommand` (a CLI subcommand name), `arg_keys` (since 0.8.0 for every record: the sorted names of the arguments given, never their values; records before 0.8.0 carry `args` with the values), `keep_config_count` (the length of the account's keep list, not its entries), `target_folder` (`move` only: where the mail went), `folder`, `affected_uids`, `result` — always a string: `success`, `partial_failure` or `error`; `unsubscribe` also writes `manual` (mailto-only, mail kept), `failed` (the HTTPS unsubscribe failed, mail kept) and `kept` (since 0.5.0: every matching message is from a sender on the account's keep list, nothing done), all with empty `affected_uids` — and `error` (an error code) when the action did not fully succeed.
 
 Only the CLI writes this file. Read-only ad-hoc scripts do not log, and nothing else may append to it.
+
+Rotation (since 0.8.0): at 5 MB the live file becomes `audit.log.1`, older copies move up to `audit.log.5`, and the oldest is dropped. The `jq` example below reads the live file only; add `audit.log.*` to include the rotated ones.
 
 Inspect with `jq`:
 
@@ -327,6 +330,7 @@ The CLI exits with a numeric code; structured errors include a stable `error` st
 | `connection_error` | IMAP connection / TLS / network failure | 2 |
 | `no_account_selected` | Multiple accounts; no default; no `--account` or env var | 4 |
 | `unknown_account` | `--account=foo` matched neither alias nor email | 4 |
+| `confirmation_required` | `config remove --delete-credentials --non-interactive`: deleting a Keychain password needs an interactive confirmation; nothing was changed (since 0.8.0) | 4 |
 | `duplicate_alias` | `auth set --alias=X` but X exists | 4 |
 | `duplicate_email` | `auth set --email=X` but X exists | 4 |
 | `bootstrap_failed` | Auto-migration from v0.1 failed | 4 |
