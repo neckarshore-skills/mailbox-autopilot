@@ -3,3 +3,4 @@ pyproject.toml:^authors = # package metadata: the published author line of this 
 LICENSE:^Copyright # license holder line required by MIT
 tests/test_leak_guard.py:(some-company\.test|owner\.test|\+49 711|DE89 3704|DE00 1234|jane\.doe@linkedin\.com|jane@github\.com|kim@ionos\.de) # the guard's own deliberate positives
 docs/2026-09-24-mailbox-autopilot-implementation-plan.md:(some-company\.test|owner\.test|\+49 711|DE89 3704|DE00 1234) # the plan quotes the guard's test inputs
+README.md:^German Rauhut · `german@rauhut\.com`$ # maintainer contact, kept public by the owner's decision of 2026-10-20 (#74)
