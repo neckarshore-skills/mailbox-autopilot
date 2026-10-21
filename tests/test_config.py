@@ -45,7 +45,7 @@ def test_derive_provider_case_insensitive():
 
 
 def test_derive_alias_simple():
-    assert derive_alias_from_email("german@rauhut.com") == "german"
+    assert derive_alias_from_email("owner@example.com") == "owner"
 
 
 def test_derive_alias_with_dot():
@@ -61,7 +61,7 @@ def test_derive_alias_with_underscore():
 
 
 def test_derive_alias_uppercase():
-    assert derive_alias_from_email("Germ4N@RAUHUT.com") == "germ4n"
+    assert derive_alias_from_email("Own3R@EXAMPLE.com") == "own3r"
 
 
 def test_derive_alias_invalid_email_raises():
@@ -74,32 +74,32 @@ def test_derive_alias_invalid_email_raises():
 
 
 def test_derive_alias_strips_leading_non_alnum():
-    assert derive_alias_from_email("-foo@x.de") == "foo"
+    assert derive_alias_from_email("-foo@x.example") == "foo"
 
 
 def test_derive_alias_underscores_only_falls_back():
-    assert derive_alias_from_email("___@x.de") == "account"
+    assert derive_alias_from_email("___@x.example") == "account"
 
 
 def test_derive_alias_dots_only_falls_back():
-    assert derive_alias_from_email("....@x.de") == "account"
+    assert derive_alias_from_email("....@x.example") == "account"
 
 
 def test_derive_alias_digits_preserved():
-    assert derive_alias_from_email("0a@x.de") == "0a"
+    assert derive_alias_from_email("0a@x.example") == "0a"
 
 
 def test_derive_alias_leading_digit_kept():
-    assert derive_alias_from_email("123abc@x.de") == "123abc"
+    assert derive_alias_from_email("123abc@x.example") == "123abc"
 
 
 def test_derive_alias_unicode_stripped():
     """Non-ASCII is dropped (documented behavior; ASCII-only aliases for v0.2)."""
-    assert derive_alias_from_email("müller@x.de") == "mller"
+    assert derive_alias_from_email("müller@x.example") == "mller"
 
 
 def test_account_dataclass_defaults():
-    a = Account(alias="work", email="x@y.de", server="imap.ionos.de")
+    a = Account(alias="work", email="x@y.example", server="imap.ionos.de")
     assert a.port == 993
     assert a.provider == "ionos"  # auto-derived
 
@@ -107,7 +107,7 @@ def test_account_dataclass_defaults():
 def test_account_explicit_provider_wins():
     a = Account(
         alias="weird",
-        email="x@y.de",
+        email="x@y.example",
         server="some.host.tld",
         provider="custom",
     )
@@ -118,7 +118,7 @@ def test_validate_config_happy_path():
     data = {
         "schema_version": 1,
         "default": "work",
-        "accounts": [{"alias": "work", "email": "a@b.de", "server": "imap.ionos.de"}],
+        "accounts": [{"alias": "work", "email": "a@b.example", "server": "imap.ionos.de"}],
     }
     cfg = validate_config(data)
     assert isinstance(cfg, Config)
@@ -138,7 +138,7 @@ def test_validate_config_unknown_default_raises():
     data = {
         "schema_version": 1,
         "default": "missing",
-        "accounts": [{"alias": "work", "email": "a@b.de", "server": "x"}],
+        "accounts": [{"alias": "work", "email": "a@b.example", "server": "x"}],
     }
     with pytest.raises(ConfigError, match="default"):
         validate_config(data)
@@ -149,8 +149,8 @@ def test_validate_config_duplicate_alias_raises():
         "schema_version": 1,
         "default": "work",
         "accounts": [
-            {"alias": "work", "email": "a@b.de", "server": "x"},
-            {"alias": "work", "email": "c@d.de", "server": "y"},
+            {"alias": "work", "email": "a@b.example", "server": "x"},
+            {"alias": "work", "email": "c@d.example", "server": "y"},
         ],
     }
     with pytest.raises(ConfigError, match="duplicate.*alias"):
@@ -162,8 +162,8 @@ def test_validate_config_duplicate_email_raises():
         "schema_version": 1,
         "default": "a",
         "accounts": [
-            {"alias": "a", "email": "x@y.de", "server": "s"},
-            {"alias": "b", "email": "x@y.de", "server": "s"},
+            {"alias": "a", "email": "x@y.example", "server": "s"},
+            {"alias": "b", "email": "x@y.example", "server": "s"},
         ],
     }
     with pytest.raises(ConfigError, match="duplicate.*email"):
@@ -174,7 +174,7 @@ def test_validate_config_bad_alias_regex_raises():
     data = {
         "schema_version": 1,
         "default": "Bad-Alias",
-        "accounts": [{"alias": "Bad-Alias", "email": "a@b.de", "server": "x"}],
+        "accounts": [{"alias": "Bad-Alias", "email": "a@b.example", "server": "x"}],
     }
     with pytest.raises(ConfigError, match="alias"):
         validate_config(data)
@@ -185,7 +185,7 @@ def test_validate_config_alias_too_long_raises():
     data = {
         "schema_version": 1,
         "default": long_alias,
-        "accounts": [{"alias": long_alias, "email": "a@b.de", "server": "x"}],
+        "accounts": [{"alias": long_alias, "email": "a@b.example", "server": "x"}],
     }
     with pytest.raises(ConfigError, match="alias"):
         validate_config(data)
@@ -196,7 +196,7 @@ def test_validate_config_alias_max_length_ok():
     data = {
         "schema_version": 1,
         "default": max_alias,
-        "accounts": [{"alias": max_alias, "email": "a@b.de", "server": "x"}],
+        "accounts": [{"alias": max_alias, "email": "a@b.example", "server": "x"}],
     }
     cfg = validate_config(data)
     assert cfg.accounts[0].alias == max_alias
@@ -222,7 +222,7 @@ def test_validate_config_missing_required_account_field_raises():
     data = {
         "schema_version": 1,
         "default": None,
-        "accounts": [{"alias": "a", "email": "a@b.de"}],  # no server
+        "accounts": [{"alias": "a", "email": "a@b.example"}],  # no server
     }
     with pytest.raises(ConfigError, match="server"):
         validate_config(data)
@@ -250,7 +250,7 @@ def test_save_and_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv(DEFAULT_CONFIG_PATH_ENV, str(p))
     cfg = Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     )
     save_config(cfg)
     assert p.exists()
@@ -292,7 +292,7 @@ def test_save_config_atomic_write(tmp_path, monkeypatch):
     save_config(
         Config(
             default="x",
-            accounts=(Account(alias="x", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="x", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     data = json.loads(p.read_text())
@@ -308,7 +308,7 @@ def test_save_config_serialises_all_account_fields(tmp_path, monkeypatch):
         accounts=(
             Account(
                 alias="work",
-                email="a@b.de",
+                email="a@b.example",
                 server="imap.gmail.com",
                 port=12345,
                 provider="custom",
@@ -324,7 +324,9 @@ def test_save_config_serialises_all_account_fields(tmp_path, monkeypatch):
 
 
 def _cfg(*aliases, default=None):
-    accounts = tuple(Account(alias=a, email=f"{a}@x.de", server="imap.ionos.de") for a in aliases)
+    accounts = tuple(
+        Account(alias=a, email=f"{a}@x.example", server="imap.ionos.de") for a in aliases
+    )
     return Config(default=default, accounts=accounts)
 
 
@@ -335,7 +337,7 @@ def test_resolve_by_flag_alias():
 
 def test_resolve_by_flag_email():
     cfg = _cfg("work", "private", default="work")
-    assert resolve_account(cfg, flag="private@x.de", env=None).alias == "private"
+    assert resolve_account(cfg, flag="private@x.example", env=None).alias == "private"
 
 
 def test_resolve_by_env_when_no_flag():
@@ -388,7 +390,7 @@ def test_resolve_inconsistent_default_asserts():
     validate_config; if reached, resolver hits an internal-invariant assertion)."""
     cfg = Config(
         default="ghost",
-        accounts=(Account(alias="real", email="r@x.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="real", email="r@x.example", server="imap.ionos.de"),),
     )
     with pytest.raises(AssertionError, match="invariant violated"):
         resolve_account(cfg, flag=None, env=None)
@@ -415,8 +417,8 @@ def test_bootstrap_creates_config_for_known_email(tmp_path, monkeypatch):
     p = tmp_path / "cfg.json"
     monkeypatch.setenv(DEFAULT_CONFIG_PATH_ENV, str(p))
     fake_kr = {
-        ("mailbox-cleanup", "german@rauhut.com"): "secret",
-        ("mailbox-cleanup", "imap-server:german@rauhut.com"): "imap.ionos.de",
+        ("mailbox-cleanup", "owner@example.com"): "secret",
+        ("mailbox-cleanup", "imap-server:owner@example.com"): "imap.ionos.de",
     }
 
     def fake_get(service, key):
@@ -428,18 +430,18 @@ def test_bootstrap_creates_config_for_known_email(tmp_path, monkeypatch):
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.side_effect = fake_get
         kr.delete_password.side_effect = fake_delete
-        cfg = bootstrap_from_v01_keychain("german@rauhut.com")
+        cfg = bootstrap_from_v01_keychain("owner@example.com")
 
-    assert cfg.default == "german"
-    assert cfg.accounts[0].alias == "german"
-    assert cfg.accounts[0].email == "german@rauhut.com"
+    assert cfg.default == "owner"
+    assert cfg.accounts[0].alias == "owner"
+    assert cfg.accounts[0].email == "owner@example.com"
     assert cfg.accounts[0].server == "imap.ionos.de"
     assert cfg.accounts[0].provider == "ionos"
     loaded = load_config()
-    assert loaded.default == "german"
-    assert ("mailbox-cleanup", "imap-server:german@rauhut.com") not in fake_kr
+    assert loaded.default == "owner"
+    assert ("mailbox-cleanup", "imap-server:owner@example.com") not in fake_kr
     # password entry preserved
-    assert ("mailbox-cleanup", "german@rauhut.com") in fake_kr
+    assert ("mailbox-cleanup", "owner@example.com") in fake_kr
 
 
 def test_bootstrap_unknown_email_raises(tmp_path, monkeypatch):
@@ -448,7 +450,7 @@ def test_bootstrap_unknown_email_raises(tmp_path, monkeypatch):
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.return_value = None
         with pytest.raises(ConfigError, match="no v0.1 credentials"):
-            bootstrap_from_v01_keychain("nobody@x.de")
+            bootstrap_from_v01_keychain("nobody@x.example")
     # Config file must NOT have been written on failure
     assert not p.exists()
 
@@ -456,7 +458,7 @@ def test_bootstrap_unknown_email_raises(tmp_path, monkeypatch):
 def test_bootstrap_default_server_when_imap_server_key_missing(tmp_path, monkeypatch):
     p = tmp_path / "cfg.json"
     monkeypatch.setenv(DEFAULT_CONFIG_PATH_ENV, str(p))
-    fake_kr = {("mailbox-cleanup", "user@x.de"): "pw"}
+    fake_kr = {("mailbox-cleanup", "user@x.example"): "pw"}
 
     def fake_get(service, key):
         return fake_kr.get((service, key))
@@ -464,7 +466,7 @@ def test_bootstrap_default_server_when_imap_server_key_missing(tmp_path, monkeyp
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.side_effect = fake_get
         kr.delete_password.return_value = None
-        cfg = bootstrap_from_v01_keychain("user@x.de")
+        cfg = bootstrap_from_v01_keychain("user@x.example")
 
     assert cfg.accounts[0].server == "imap.ionos.de"
     assert cfg.accounts[0].provider == "ionos"
@@ -475,7 +477,7 @@ def test_bootstrap_keyring_delete_failure_is_swallowed(tmp_path, monkeypatch):
     even if the obsolete imap-server key cannot be removed."""
     p = tmp_path / "cfg.json"
     monkeypatch.setenv(DEFAULT_CONFIG_PATH_ENV, str(p))
-    fake_kr = {("mailbox-cleanup", "user@x.de"): "pw"}
+    fake_kr = {("mailbox-cleanup", "user@x.example"): "pw"}
 
     def fake_get(service, key):
         return fake_kr.get((service, key))
@@ -486,7 +488,20 @@ def test_bootstrap_keyring_delete_failure_is_swallowed(tmp_path, monkeypatch):
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.side_effect = fake_get
         kr.delete_password.side_effect = boom
-        cfg = bootstrap_from_v01_keychain("user@x.de")
+        cfg = bootstrap_from_v01_keychain("user@x.example")
 
     assert cfg.accounts[0].alias == "user"
     assert load_config().default == "user"
+
+
+def test_the_shipped_config_example_is_valid_and_neutral():
+    """docs/config.example.json (#74): loads with the real validator, example data only."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    path = _Path(__file__).parent.parent / "docs" / "config.example.json"
+    cfg = validate_config(_json.loads(path.read_text(encoding="utf-8")))
+    assert [a.alias for a in cfg.accounts] == ["work", "private"]
+    assert cfg.accounts[0].keep == ("billing@example.org", "@bank.example")
+    for a in cfg.accounts:
+        assert a.email.endswith(("@example.com", "@example.net", "@example.org"))

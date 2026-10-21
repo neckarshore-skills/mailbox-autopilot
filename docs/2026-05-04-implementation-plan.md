@@ -174,8 +174,8 @@ from mailbox_cleanup.auth import (
 
 
 def test_credentials_dataclass():
-    c = Credentials(email="a@b.com", password="secret", server="imap.ionos.de")
-    assert c.email == "a@b.com"
+    c = Credentials(email="a@b.example", password="secret", server="imap.ionos.de")
+    assert c.email == "a@b.example"
     assert c.password == "secret"
     assert c.server == "imap.ionos.de"
 
@@ -186,10 +186,10 @@ def test_set_and_get_credentials_roundtrip():
         kr.set_password.side_effect = lambda s, a, p: store.setdefault((s, a), p) or store.update({(s, a): p})
         kr.get_password.side_effect = lambda s, a: store.get((s, a))
 
-        set_credentials("user@x.de", "pw123", "imap.ionos.de")
+        set_credentials("user@x.example", "pw123", "imap.ionos.de")
 
-        creds = get_credentials("user@x.de")
-        assert creds.email == "user@x.de"
+        creds = get_credentials("user@x.example")
+        assert creds.email == "user@x.example"
         assert creds.password == "pw123"
         assert creds.server == "imap.ionos.de"
 
@@ -198,18 +198,18 @@ def test_get_credentials_missing_raises():
     with patch("mailbox_cleanup.auth.keyring") as kr:
         kr.get_password.return_value = None
         try:
-            get_credentials("nobody@x.de")
+            get_credentials("nobody@x.example")
         except AuthMissingError as e:
-            assert "nobody@x.de" in str(e)
+            assert "nobody@x.example" in str(e)
             return
         raise AssertionError("Expected AuthMissingError")
 
 
 def test_delete_credentials():
     with patch("mailbox_cleanup.auth.keyring") as kr:
-        delete_credentials("user@x.de")
-        kr.delete_password.assert_any_call(SERVICE_NAME, "user@x.de")
-        kr.delete_password.assert_any_call(SERVICE_NAME, "imap-server:user@x.de")
+        delete_credentials("user@x.example")
+        kr.delete_password.assert_any_call(SERVICE_NAME, "user@x.example")
+        kr.delete_password.assert_any_call(SERVICE_NAME, "imap-server:user@x.example")
 ```
 
 - [ ] **Step 2: Run tests — verify they fail**
@@ -318,11 +318,11 @@ def test_auth_set_writes_to_keychain():
     with patch("mailbox_cleanup.cli.set_credentials") as set_creds:
         result = runner.invoke(
             cli,
-            ["auth", "set", "--email", "a@b.de", "--server", "imap.ionos.de"],
+            ["auth", "set", "--email", "a@b.example", "--server", "imap.ionos.de"],
             input="my-password\n",
         )
         assert result.exit_code == 0
-        set_creds.assert_called_once_with("a@b.de", "my-password", "imap.ionos.de")
+        set_creds.assert_called_once_with("a@b.example", "my-password", "imap.ionos.de")
 
 
 def test_auth_test_success_json():
@@ -334,12 +334,12 @@ def test_auth_test_success_json():
     fake_client.__enter__.return_value.folder.list.return_value = [inbox, sent]
     with patch("mailbox_cleanup.cli.get_credentials") as get_creds, \
          patch("mailbox_cleanup.cli.imap_connect", return_value=fake_client):
-        get_creds.return_value = MagicMock(email="a@b.de", server="imap.ionos.de")
-        result = runner.invoke(cli, ["auth", "test", "--email", "a@b.de", "--json"])
+        get_creds.return_value = MagicMock(email="a@b.example", server="imap.ionos.de")
+        result = runner.invoke(cli, ["auth", "test", "--email", "a@b.example", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["ok"] is True
-        assert data["email"] == "a@b.de"
+        assert data["email"] == "a@b.example"
         assert "folders" in data
 
 
@@ -347,7 +347,7 @@ def test_auth_test_missing_credentials_exit_3():
     from mailbox_cleanup.auth import AuthMissingError
     runner = CliRunner()
     with patch("mailbox_cleanup.cli.get_credentials", side_effect=AuthMissingError("no creds")):
-        result = runner.invoke(cli, ["auth", "test", "--email", "a@b.de", "--json"])
+        result = runner.invoke(cli, ["auth", "test", "--email", "a@b.example", "--json"])
         assert result.exit_code == 3
         data = json.loads(result.output)
         assert data["ok"] is False
@@ -964,15 +964,15 @@ from mailbox_cleanup.classify import (
 
 def test_newsletter_via_unsubscribe_header():
     headers = {"list-unsubscribe": "<https://x.com/unsub>"}
-    assert is_newsletter(from_addr="x@y.com", subject="hi", headers=headers)
+    assert is_newsletter(from_addr="x@y.example", subject="hi", headers=headers)
 
 
 def test_newsletter_via_sender_pattern():
     assert is_newsletter(from_addr="newsletter@linkedin.com", subject="x", headers={})
     assert is_newsletter(from_addr="noreply@github.com", subject="x", headers={})
-    assert is_newsletter(from_addr="no-reply@x.com", subject="x", headers={})
+    assert is_newsletter(from_addr="no-reply@x.example", subject="x", headers={})
     assert is_newsletter(from_addr="news@medium.com", subject="x", headers={})
-    assert is_newsletter(from_addr="marketing@x.com", subject="x", headers={})
+    assert is_newsletter(from_addr="marketing@x.example", subject="x", headers={})
 
 
 def test_not_newsletter_for_personal():
@@ -981,12 +981,12 @@ def test_not_newsletter_for_personal():
 
 def test_automated_sender_patterns():
     for local in ["notifications", "bot", "service", "alerts", "system", "daemon", "automation"]:
-        assert is_automated(from_addr=f"{local}@x.com", subject="x", headers={})
+        assert is_automated(from_addr=f"{local}@x.example", subject="x", headers={})
 
 
 def test_bounce_via_mailer_daemon():
     assert is_bounce(from_addr="MAILER-DAEMON@ionos.de", subject="x", headers={})
-    assert is_bounce(from_addr="postmaster@x.com", subject="x", headers={})
+    assert is_bounce(from_addr="postmaster@x.example", subject="x", headers={})
 
 
 def test_bounce_via_subject_prefix():
@@ -999,7 +999,7 @@ def test_bounce_via_subject_prefix():
         "Out of Office: vacation",
         "Abwesenheitsnotiz",
     ]:
-        assert is_bounce(from_addr="x@y.de", subject=prefix, headers={})
+        assert is_bounce(from_addr="x@y.example", subject=prefix, headers={})
 
 
 def test_classify_returns_set_of_categories():
@@ -1197,16 +1197,16 @@ def test_build_report_counts_categories():
 def test_build_report_top_senders_sorted():
     msgs = []
     for i in range(5):
-        msgs.append(_msg("a@news.com", "x", 1000, f"<a{i}>", datetime(2025, 1, 1, tzinfo=timezone.utc),
+        msgs.append(_msg("a@news.example", "x", 1000, f"<a{i}>", datetime(2025, 1, 1, tzinfo=timezone.utc),
                          headers={"list-unsubscribe": "<https://x>"}))
     for i in range(2):
-        msgs.append(_msg("b@news.com", "x", 1000, f"<b{i}>", datetime(2025, 1, 1, tzinfo=timezone.utc),
+        msgs.append(_msg("b@news.example", "x", 1000, f"<b{i}>", datetime(2025, 1, 1, tzinfo=timezone.utc),
                          headers={"list-unsubscribe": "<https://x>"}))
     report = build_report(msgs, folder="INBOX", now=datetime(2026, 5, 4, tzinfo=timezone.utc))
     senders = report["categories"]["newsletters"]["top_senders"]
-    assert senders[0]["sender"] == "a@news.com"
+    assert senders[0]["sender"] == "a@news.example"
     assert senders[0]["count"] == 5
-    assert senders[1]["sender"] == "b@news.com"
+    assert senders[1]["sender"] == "b@news.example"
     assert senders[1]["count"] == 2
 
 
@@ -1621,7 +1621,7 @@ def tmp_audit(tmp_path, monkeypatch):
 def test_log_action_appends_jsonl(tmp_audit):
     log_action(
         subcommand="delete",
-        args={"sender": "x@y.com", "older_than": "6m"},
+        args={"sender": "x@y.example", "older_than": "6m"},
         folder="INBOX",
         affected_uids=["1", "2", "3"],
         result="success",
@@ -1648,7 +1648,7 @@ def test_log_action_appends_jsonl(tmp_audit):
 def test_log_action_records_failure(tmp_audit):
     log_action(
         subcommand="delete",
-        args={"sender": "x@y.com"},
+        args={"sender": "x@y.example"},
         folder="INBOX",
         affected_uids=[],
         result="failure",
@@ -1783,14 +1783,14 @@ def test_parse_age_invalid():
 
 
 def test_build_imap_search_sender_only():
-    q = build_imap_search(sender="newsletter@x.com")
+    q = build_imap_search(sender="newsletter@x.example")
     assert "FROM" in str(q)
 
 
 def test_build_imap_search_combined():
     now = datetime(2026, 5, 4, tzinfo=timezone.utc)
     q = build_imap_search(
-        sender="x@y.de",
+        sender="x@y.example",
         subject_contains="invoice",
         older_than="3m",
         now=now,
@@ -2297,7 +2297,7 @@ from mailbox_cleanup.operations.archive import run_archive
 def _msg(uid, year):
     m = MagicMock()
     m.uid = uid
-    m.from_ = "x@y.com"
+    m.from_ = "x@y.example"
     m.subject = f"msg {uid}"
     m.date = datetime(year, 6, 1, tzinfo=timezone.utc)
     return m
@@ -2504,7 +2504,7 @@ def _msg(uid, mid, date):
     m.uid = uid
     m.headers = {"message-id": (mid,)}
     m.date = date
-    m.from_ = "x@y.com"
+    m.from_ = "x@y.example"
     m.subject = "s"
     return m
 
@@ -2701,7 +2701,7 @@ from mailbox_cleanup.operations.attachments import find_large_messages
 def _msg(uid, size, date):
     m = MagicMock()
     m.uid = uid
-    m.from_ = "x@y.com"
+    m.from_ = "x@y.example"
     m.subject = "huge"
     m.size = size
     m.date = date
@@ -2923,10 +2923,10 @@ def test_parse_https_only():
 
 def test_parse_mailto_only():
     actions = parse_list_unsubscribe(
-        list_unsubscribe="<mailto:unsub@x.com?subject=unsubscribe>",
+        list_unsubscribe="<mailto:unsub@x.example?subject=unsubscribe>",
         list_unsubscribe_post=None,
     )
-    assert any(a.kind == "mailto" and a.target == "unsub@x.com" for a in actions)
+    assert any(a.kind == "mailto" and a.target == "unsub@x.example" for a in actions)
 
 
 def test_parse_both_https_preferred():

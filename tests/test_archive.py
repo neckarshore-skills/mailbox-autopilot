@@ -8,7 +8,7 @@ from tests._imap_fakes import move_capable_client
 def _msg(uid, year):
     m = MagicMock()
     m.uid = uid
-    m.from_ = "x@y.com"
+    m.from_ = "x@y.example"
     m.subject = f"msg {uid}"
     m.date = datetime(year, 6, 1, tzinfo=UTC)
     return m

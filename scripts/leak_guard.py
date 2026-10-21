@@ -1,19 +1,47 @@
 """Leak guard for a public repository (spec §6). Not shipped in the package.
 
-CI mode scans only the lines a pull request ADDS (`--diff`); file mode scans whole files
-and is used for the one-time local run over the full tree.
+Three modes:
+- `--diff FILE` scans only the lines a pull request ADDS;
+- `--tree` scans every file git tracks, so content older than the pull request is seen too
+  (#74; CI runs it on every pull request and every push to main);
+- file mode scans the files named on the command line.
+
+Private patterns come from the `LEAK_GUARD_PRIVATE_LIST` env var (CI secret) and from
+`.leakguard-local.txt` (local, git-ignored), one regex per line. Hits from them are
+reported by position only, never with the pattern or the text.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+LOCAL_DENY_LIST = ".leakguard-local.txt"
+
 # RFC 2606 reserved names plus localhost; subdomains of these are allowed too
-ALLOWED_EMAIL_DOMAINS = ("example.com", "example.org", "example.net", "example", "localhost")
+ALLOWED_EMAIL_DOMAINS = (
+    "example.com",
+    "example.org",
+    "example.net",
+    "example",
+    "invalid",
+    "localhost",
+)
+# Vendor SYSTEM mailboxes used as fixtures: exact local parts, never a whole domain, so a
+# person at the same vendor still hits. Extending this list is a reviewed change.
+SYSTEM_ADDRESS_RE = re.compile(
+    r"^(?:"
+    r"newsletter(?:-\d+)?@linkedin\.com"
+    r"|(?:noreply|notifications|automated-\d+)@github\.com"
+    r"|(?:mailer-daemon|bounce-\d+|noreply)@ionos\.de"
+    r"|news@medium\.com"
+    r")$",
+    re.IGNORECASE,
+)
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost)\b")
 IBAN_RE = re.compile(r"\b([A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?)\b")
 PHONE_RE = re.compile(
@@ -263,7 +291,10 @@ def scan_lines(entries, private_patterns, allow) -> list[Hit]:
     for path, n, line in entries:
         if _allowed(path, line, allow):
             continue
-        if any(not _email_allowed(m.group(1)) for m in EMAIL_RE.finditer(line)):
+        if any(
+            not _email_allowed(m.group(1)) and not SYSTEM_ADDRESS_RE.match(m.group(0))
+            for m in EMAIL_RE.finditer(line)
+        ):
             hits.append(Hit(path, n, "public", "email"))
         if any(_iban_valid(m.group(1)) for m in IBAN_RE.finditer(line)):
             hits.append(Hit(path, n, "public", "iban"))
@@ -302,8 +333,24 @@ def _parse_private_list(raw: str) -> list[str]:
     return [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
 
+def _tracked_files() -> list[str]:
+    """Every file git tracks in the current directory's repository, minus the local deny
+    list (its entries would hit themselves if it were ever force-added)."""
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], check=True, capture_output=True, text=True
+    ).stdout
+    return [f for f in out.split("\0") if f and Path(f).name != LOCAL_DENY_LIST]
+
+
 def main(argv: list[str]) -> int:
     raw = os.environ.get("LEAK_GUARD_PRIVATE_LIST", "")
+    local = Path(LOCAL_DENY_LIST)
+    if local.is_file():
+        raw += "\n" + "\n".join(
+            ln
+            for ln in local.read_text(encoding="utf-8").splitlines()
+            if not ln.lstrip().startswith("#")
+        )
     private = _parse_private_list(raw)
     if not private:
         print("leak-guard: private list not available in this context; public patterns only")
@@ -327,6 +374,13 @@ def main(argv: list[str]) -> int:
             return 1
         hits = scan_lines(entries, private, allow)
         scope = f"{len(entries)} added line(s)"
+    elif argv == ["--tree"]:
+        files = _tracked_files()
+        hits = scan_files(files, private, allow)
+        scope = f"{len(files)} file(s)"
+    elif any(a.startswith("--") for a in argv):
+        print(f"leak-guard: unknown option {argv[0]!r}; use --diff FILE, --tree or file paths")
+        return 2
     else:
         hits = scan_files(argv, private, allow)
         scope = f"{len(argv)} file(s)"

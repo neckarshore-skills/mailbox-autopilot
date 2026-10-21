@@ -2,6 +2,8 @@ name: Leak guard
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -15,9 +17,16 @@ jobs:
         with:
           fetch-depth: 0
       - name: Scan the lines this pull request adds
+        if: github.event_name == 'pull_request'
         env:
           LEAK_GUARD_PRIVATE_LIST: ${{ secrets.LEAK_GUARD_PRIVATE_LIST }}
           BASE_REF: ${{ github.base_ref }}
         run: |
           git diff -U0 --no-color --text --diff-filter=ACMRT "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/leak_guard.py --diff /tmp/pr.diff
+      # #74: content older than the pull request is scanned too, on every pull request
+      # and on every push to main. The diff step above stays: it reads undiffed binaries.
+      - name: Scan every tracked file
+        env:
+          LEAK_GUARD_PRIVATE_LIST: ${{ secrets.LEAK_GUARD_PRIVATE_LIST }}
+        run: python3 scripts/leak_guard.py --tree

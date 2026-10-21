@@ -45,7 +45,7 @@ State files (per user):
 
 | Path | Purpose | Mode |
 |------|---------|------|
-| `~/.mailbox-cleanup/config.json` | Identity + connection settings per account (source of truth) | 0600 |
+| `~/.mailbox-cleanup/config.json` | Identity + connection settings per account (source of truth); a sample with example data is [`docs/config.example.json`](docs/config.example.json) | 0600 |
 | macOS Keychain (service `mailbox-cleanup`) | Passwords only — one entry per email | OS-managed |
 | `~/.mailbox-cleanup/audit.log` | JSONL forensics, includes `account` field per record; rotates at 5 MB, five rotated files kept (since 0.8.0) | 0600 (directory 0700) |
 
@@ -261,23 +261,23 @@ If only one account is configured, `--account` can be omitted.
 
 ## Discovery report (`scan --json`)
 
-The contract between CLI and Skill — `scan` always emits this shape:
+The contract between CLI and Skill — `scan` always emits this shape (the figures are made-up examples):
 
 ```json
 {
   "schema_version": 1,
   "scanned_at": "2026-05-04T...",
   "folder": "INBOX",
-  "total_messages": 7982,
-  "size_total_mb": 65.5,
+  "total_messages": 8000,
+  "size_total_mb": 60.0,
   "categories": {
-    "newsletters": {"count": 5649, "top_senders": []},
-    "automated_notifications": {"count": 652, "top_senders": []},
-    "bounces_and_autoreplies": {"count": 1, "samples": []},
+    "newsletters": {"count": 5500, "top_senders": []},
+    "automated_notifications": {"count": 600, "top_senders": []},
+    "bounces_and_autoreplies": {"count": 2, "samples": []},
     "large_attachments": {"count": 0, "size_mb": 0, "top_offenders": []},
-    "duplicates": {"count": 18, "groups": []},
-    "old_messages": {"older_than_12m": 196},
-    "by_year": {"2024": 73, "2025": 887, "2026": 7022}
+    "duplicates": {"count": 20, "groups": []},
+    "old_messages": {"older_than_12m": 200},
+    "by_year": {"2024": 100, "2025": 900, "2026": 7000}
   },
   "recommendations": ["...", "..."]
 }
