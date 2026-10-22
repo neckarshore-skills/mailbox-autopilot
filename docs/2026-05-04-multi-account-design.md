@@ -35,7 +35,7 @@ The current Keychain key `imap-server:<email>` is removed during migration — s
   "accounts": [
     {
       "alias": "work",
-      "email": "german@rauhut.com",
+      "email": "owner@example.com",
       "server": "imap.ionos.de",
       "port": 993,
       "provider": "ionos"
@@ -125,7 +125,7 @@ Python's `keyring` library cannot portably enumerate stored entries, so we canno
 If `~/.mailbox-cleanup/config.json` does **not** exist AND the user supplies `--email=<email>` (their v0.1 habit) AND the Keychain has a password for that email, then before the subcommand executes:
 
 1. Read `imap-server:<email>` from Keychain (fallback `imap.ionos.de`); derive `provider` from server hostname.
-2. Derive `alias` from the email local-part, slugified to match `^[a-z0-9][a-z0-9_-]*$` (e.g. `german@rauhut.com → german`, `first.last@x → first-last`).
+2. Derive `alias` from the email local-part, slugified to match `^[a-z0-9][a-z0-9_-]*$` (e.g. `owner@example.com → german`, `first.last@x → first-last`).
 3. Write `config.json` with `schema_version: 1`, the single account, and `default = <alias>`.
 4. Delete the obsolete `imap-server:<email>` Keychain entry (the password entry is unchanged).
 5. Print to stderr: `Migrated to multi-account config (alias: <alias>). Use 'mailbox-cleanup config rename' to change.`

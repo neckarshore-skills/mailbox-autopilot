@@ -9,13 +9,13 @@ from mailbox_cleanup.classify import (
 
 def test_newsletter_via_unsubscribe_header():
     headers = {"list-unsubscribe": "<https://x.com/unsub>"}
-    assert is_newsletter(from_addr="x@y.com", subject="hi", headers=headers)
+    assert is_newsletter(from_addr="x@y.example", subject="hi", headers=headers)
 
 
 def test_newsletter_via_sender_pattern():
     assert is_newsletter(from_addr="newsletter@linkedin.com", subject="x", headers={})
     assert is_newsletter(from_addr="news@medium.com", subject="x", headers={})
-    assert is_newsletter(from_addr="marketing@x.com", subject="x", headers={})
+    assert is_newsletter(from_addr="marketing@x.example", subject="x", headers={})
 
 
 def test_noreply_sender_alone_is_not_a_newsletter():
@@ -46,12 +46,12 @@ def test_not_newsletter_for_personal():
 
 def test_automated_sender_patterns():
     for local in ["notifications", "bot", "service", "alerts", "system", "daemon", "automation"]:
-        assert is_automated(from_addr=f"{local}@x.com", subject="x", headers={})
+        assert is_automated(from_addr=f"{local}@x.example", subject="x", headers={})
 
 
 def test_bounce_via_mailer_daemon():
     assert is_bounce(from_addr="MAILER-DAEMON@ionos.de", subject="x", headers={})
-    assert is_bounce(from_addr="postmaster@x.com", subject="x", headers={})
+    assert is_bounce(from_addr="postmaster@x.example", subject="x", headers={})
 
 
 def test_bounce_via_subject_prefix():
@@ -64,7 +64,7 @@ def test_bounce_via_subject_prefix():
         "Out of Office: vacation",
         "Abwesenheitsnotiz",
     ]:
-        assert is_bounce(from_addr="x@y.de", subject=prefix, headers={})
+        assert is_bounce(from_addr="x@y.example", subject=prefix, headers={})
 
 
 def test_classify_returns_set_of_categories():

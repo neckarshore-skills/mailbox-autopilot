@@ -10,7 +10,7 @@ def _msg(uid, mid, date):
     m.uid = uid
     m.headers = {"message-id": (mid,)}
     m.date = date
-    m.from_ = "x@y.com"
+    m.from_ = "x@y.example"
     m.subject = "s"
     return m
 

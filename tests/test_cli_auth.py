@@ -33,18 +33,27 @@ def test_auth_set_writes_to_keychain_and_config(cfg_env):
     with patch("mailbox_cleanup.cli.set_credentials") as set_creds:
         result = runner.invoke(
             cli,
-            ["auth", "set", "--alias", "work", "--email", "a@b.de", "--server", "imap.ionos.de"],
+            [
+                "auth",
+                "set",
+                "--alias",
+                "work",
+                "--email",
+                "a@b.example",
+                "--server",
+                "imap.ionos.de",
+            ],
             input="my-password\n",
         )
         assert result.exit_code == 0, result.output
-        set_creds.assert_called_once_with("a@b.de", "my-password", "imap.ionos.de")
+        set_creds.assert_called_once_with("a@b.example", "my-password", "imap.ionos.de")
 
 
 def test_auth_test_success_json(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
@@ -62,7 +71,7 @@ def test_auth_test_success_json(cfg_env):
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["ok"] is True
-        assert data["email"] == "a@b.de"
+        assert data["email"] == "a@b.example"
         assert data["account"] == "work"
         assert "folders" in data
 
@@ -71,7 +80,7 @@ def test_auth_test_missing_credentials_exit_3(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()

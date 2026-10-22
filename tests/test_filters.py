@@ -27,14 +27,14 @@ def test_parse_age_invalid():
 
 
 def test_build_imap_search_sender_only():
-    q = build_imap_search(sender="newsletter@x.com")
+    q = build_imap_search(sender="newsletter@x.example")
     assert "FROM" in str(q)
 
 
 def test_build_imap_search_combined():
     now = datetime(2026, 5, 4, tzinfo=UTC)
     q = build_imap_search(
-        sender="x@y.de",
+        sender="x@y.example",
         subject_contains="invoice",
         older_than="3m",
         now=now,

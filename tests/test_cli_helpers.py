@@ -21,8 +21,8 @@ def _make_existing_config(tmp_path, monkeypatch, *, default="work"):
         Config(
             default=default,
             accounts=(
-                Account(alias="work", email="work@x.de", server="imap.ionos.de"),
-                Account(alias="private", email="priv@y.de", server="imap.ionos.de"),
+                Account(alias="work", email="work@x.example", server="imap.ionos.de"),
+                Account(alias="private", email="priv@y.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -40,34 +40,38 @@ def _patch_auth_keyring(passwords: dict):
 def test_resolves_via_account_flag(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_auth_keyring({"work@x.de": "pw1", "priv@y.de": "pw2"}):
+    with _patch_auth_keyring({"work@x.example": "pw1", "priv@y.example": "pw2"}):
         account, creds = resolve_account_and_credentials(account_flag="private", email_flag=None)
     assert account.alias == "private"
-    assert creds.email == "priv@y.de"
+    assert creds.email == "priv@y.example"
     assert creds.password == "pw2"
 
 
 def test_email_flag_used_as_account_with_deprecation_warning(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_auth_keyring({"work@x.de": "pw1", "priv@y.de": "pw2"}):
+    with _patch_auth_keyring({"work@x.example": "pw1", "priv@y.example": "pw2"}):
         with pytest.warns(DeprecationWarning, match="--email is deprecated"):
-            account, _ = resolve_account_and_credentials(account_flag=None, email_flag="work@x.de")
+            account, _ = resolve_account_and_credentials(
+                account_flag=None, email_flag="work@x.example"
+            )
     assert account.alias == "work"
 
 
 def test_account_flag_overrides_email_flag(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_auth_keyring({"work@x.de": "p", "priv@y.de": "p"}):
-        account, _ = resolve_account_and_credentials(account_flag="private", email_flag="work@x.de")
+    with _patch_auth_keyring({"work@x.example": "p", "priv@y.example": "p"}):
+        account, _ = resolve_account_and_credentials(
+            account_flag="private", email_flag="work@x.example"
+        )
     assert account.alias == "private"
 
 
 def test_env_var_used_when_no_flags(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.setenv("MAILBOX_CLEANUP_ACCOUNT", "private")
-    with _patch_auth_keyring({"work@x.de": "p", "priv@y.de": "p"}):
+    with _patch_auth_keyring({"work@x.example": "p", "priv@y.example": "p"}):
         account, _ = resolve_account_and_credentials(account_flag=None, email_flag=None)
     assert account.alias == "private"
 
@@ -75,7 +79,7 @@ def test_env_var_used_when_no_flags(tmp_path, monkeypatch):
 def test_falls_back_to_default(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_auth_keyring({"work@x.de": "p", "priv@y.de": "p"}):
+    with _patch_auth_keyring({"work@x.example": "p", "priv@y.example": "p"}):
         account, _ = resolve_account_and_credentials(account_flag=None, email_flag=None)
     assert account.alias == "work"  # default
 
@@ -87,8 +91,8 @@ def test_auto_bootstrap_when_no_config_and_email_flag(tmp_path, monkeypatch, cap
     assert not p.exists()
 
     keychain = {
-        ("mailbox-cleanup", "german@rauhut.com"): "pw",
-        ("mailbox-cleanup", "imap-server:german@rauhut.com"): "imap.ionos.de",
+        ("mailbox-cleanup", "owner@example.com"): "pw",
+        ("mailbox-cleanup", "imap-server:owner@example.com"): "imap.ionos.de",
     }
 
     def cfg_get(service, key):
@@ -108,11 +112,11 @@ def test_auto_bootstrap_when_no_config_and_email_flag(tmp_path, monkeypatch, cap
         cfg_kr.delete_password.return_value = None
         with pytest.warns(DeprecationWarning):
             account, creds = resolve_account_and_credentials(
-                account_flag=None, email_flag="german@rauhut.com"
+                account_flag=None, email_flag="owner@example.com"
             )
 
     assert p.exists()
-    assert account.alias == "german"
+    assert account.alias == "owner"
     assert creds.password == "pw"
     err = capsys.readouterr().err
     assert "Migrated to multi-account config" in err

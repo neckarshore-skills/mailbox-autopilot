@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "default": "work",
+  "accounts": [
+    {
+      "alias": "work",
+      "email": "owner@example.com",
+      "server": "imap.example.com",
+      "port": 993,
+      "provider": "",
+      "keep": ["billing@example.org", "@bank.example"]
+    },
+    {
+      "alias": "private",
+      "email": "owner.private@example.net",
+      "server": "imap.example.net",
+      "port": 993,
+      "provider": "",
+      "keep": []
+    }
+  ]
+}
