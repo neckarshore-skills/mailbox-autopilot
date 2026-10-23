@@ -66,7 +66,7 @@ def test_build_report_top_senders_sorted():
     for i in range(5):
         msgs.append(
             _msg(
-                "a@news.com",
+                "a@news.example",
                 "x",
                 1000,
                 f"<a{i}>",
@@ -77,7 +77,7 @@ def test_build_report_top_senders_sorted():
     for i in range(2):
         msgs.append(
             _msg(
-                "b@news.com",
+                "b@news.example",
                 "x",
                 1000,
                 f"<b{i}>",
@@ -87,9 +87,9 @@ def test_build_report_top_senders_sorted():
         )
     report = build_report(msgs, folder="INBOX", now=datetime(2026, 5, 4, tzinfo=UTC))
     senders = report["categories"]["newsletters"]["top_senders"]
-    assert senders[0]["sender"] == "a@news.com"
+    assert senders[0]["sender"] == "a@news.example"
     assert senders[0]["count"] == 5
-    assert senders[1]["sender"] == "b@news.com"
+    assert senders[1]["sender"] == "b@news.example"
     assert senders[1]["count"] == 2
 
 

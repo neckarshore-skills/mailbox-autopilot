@@ -26,8 +26,8 @@ def _cfg_two_accounts():
     return Config(
         default="work",
         accounts=(
-            Account(alias="work", email="w@x.de", server="imap.ionos.de"),
-            Account(alias="private", email="p@y.de", server="imap.ionos.de"),
+            Account(alias="work", email="w@x.example", server="imap.ionos.de"),
+            Account(alias="private", email="p@y.example", server="imap.ionos.de"),
         ),
     )
 
@@ -57,7 +57,7 @@ def test_scan_uses_account_flag(cfg_env):
         runner = CliRunner()
         r = runner.invoke(cli, ["scan", "--account", "private", "--json"])
     assert r.exit_code == 0, r.output
-    assert seen["email"] == "p@y.de"
+    assert seen["email"] == "p@y.example"
 
 
 def test_scan_falls_back_to_default(cfg_env):
@@ -75,7 +75,7 @@ def test_scan_falls_back_to_default(cfg_env):
         runner = CliRunner()
         r = runner.invoke(cli, ["scan", "--json"])
     assert r.exit_code == 0, r.output
-    assert seen["email"] == "w@x.de"  # default
+    assert seen["email"] == "w@x.example"  # default
 
 
 def test_scan_env_var_overrides_default(cfg_env, monkeypatch):
@@ -94,7 +94,7 @@ def test_scan_env_var_overrides_default(cfg_env, monkeypatch):
         runner = CliRunner()
         r = runner.invoke(cli, ["scan", "--json"])
     assert r.exit_code == 0, r.output
-    assert seen["email"] == "p@y.de"
+    assert seen["email"] == "p@y.example"
 
 
 def test_scan_email_flag_still_works(cfg_env):
@@ -110,9 +110,9 @@ def test_scan_email_flag_still_works(cfg_env):
         patch("mailbox_cleanup.cli.imap_connect", side_effect=fake_connect),
     ):
         runner = CliRunner()
-        r = runner.invoke(cli, ["scan", "--email", "w@x.de", "--json"])
+        r = runner.invoke(cli, ["scan", "--email", "w@x.example", "--json"])
     assert r.exit_code == 0, r.output
-    assert seen["email"] == "w@x.de"
+    assert seen["email"] == "w@x.example"
 
 
 def test_senders_uses_account_flag(cfg_env):
@@ -130,7 +130,7 @@ def test_senders_uses_account_flag(cfg_env):
         runner = CliRunner()
         r = runner.invoke(cli, ["senders", "--account", "private", "--top", "5"])
     assert r.exit_code == 0, r.output
-    assert seen["email"] == "p@y.de"
+    assert seen["email"] == "p@y.example"
 
 
 @pytest.mark.parametrize(

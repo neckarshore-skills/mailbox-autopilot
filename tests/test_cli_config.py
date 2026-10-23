@@ -41,8 +41,8 @@ def test_config_init_idempotent(cfg_env):
 def test_config_init_with_import_email_bootstraps(cfg_env, monkeypatch):
     """`config init --import-email=<email>` runs the v0.1 bootstrap path."""
     fake_kr = {
-        ("mailbox-cleanup", "german@rauhut.com"): "secret",
-        ("mailbox-cleanup", "imap-server:german@rauhut.com"): "imap.ionos.de",
+        ("mailbox-cleanup", "owner@example.com"): "secret",
+        ("mailbox-cleanup", "imap-server:owner@example.com"): "imap.ionos.de",
     }
     monkeypatch.setattr(
         "mailbox_cleanup.config.keyring.get_password",
@@ -55,12 +55,12 @@ def test_config_init_with_import_email_bootstraps(cfg_env, monkeypatch):
     runner = CliRunner()
     r = runner.invoke(
         cli,
-        ["config", "init", "--import-email", "german@rauhut.com"],
+        ["config", "init", "--import-email", "owner@example.com"],
     )
     assert r.exit_code == 0, r.output
     cfg = load_config()
-    assert cfg.default == "german"
-    assert cfg.accounts[0].email == "german@rauhut.com"
+    assert cfg.default == "owner"
+    assert cfg.accounts[0].email == "owner@example.com"
 
 
 def test_config_init_with_import_email_no_credentials_fails(cfg_env, monkeypatch):
@@ -68,7 +68,7 @@ def test_config_init_with_import_email_no_credentials_fails(cfg_env, monkeypatch
     runner = CliRunner()
     r = runner.invoke(
         cli,
-        ["config", "init", "--import-email", "nobody@x.de"],
+        ["config", "init", "--import-email", "nobody@x.example"],
     )
     assert r.exit_code != 0
     assert "bootstrap_failed" in r.output
@@ -79,8 +79,8 @@ def test_config_list_json(cfg_env):
         Config(
             default="work",
             accounts=(
-                Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-                Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+                Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+                Account(alias="private", email="c@d.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -97,14 +97,14 @@ def test_config_list_text(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
     r = runner.invoke(cli, ["config", "list"])
     assert r.exit_code == 0
     assert "work" in r.output
-    assert "a@b.de" in r.output
+    assert "a@b.example" in r.output
 
 
 def test_config_list_no_config_fails(cfg_env):
@@ -118,7 +118,7 @@ def test_config_show_default(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
@@ -133,8 +133,8 @@ def test_config_show_specific_alias(cfg_env):
         Config(
             default="work",
             accounts=(
-                Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-                Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+                Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+                Account(alias="private", email="c@d.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -148,7 +148,7 @@ def test_config_show_unknown_alias_fails(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
@@ -162,8 +162,8 @@ def test_config_show_no_alias_no_default_fails(cfg_env):
         Config(
             default=None,
             accounts=(
-                Account(alias="a", email="a@x.de", server="imap.ionos.de"),
-                Account(alias="b", email="b@x.de", server="imap.ionos.de"),
+                Account(alias="a", email="a@x.example", server="imap.ionos.de"),
+                Account(alias="b", email="b@x.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -178,8 +178,8 @@ def test_config_set_default(cfg_env):
         Config(
             default="work",
             accounts=(
-                Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-                Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+                Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+                Account(alias="private", email="c@d.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -193,7 +193,7 @@ def test_config_set_default_unknown_fails(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
@@ -206,7 +206,7 @@ def test_config_rename(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
@@ -221,7 +221,7 @@ def test_config_rename_unknown_old_fails(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()
@@ -235,8 +235,8 @@ def test_config_rename_to_existing_fails(cfg_env):
         Config(
             default="work",
             accounts=(
-                Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-                Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+                Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+                Account(alias="private", email="c@d.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -318,8 +318,8 @@ def test_config_remove_default_clears_default_field(cfg_env, monkeypatch):
         Config(
             default="work",
             accounts=(
-                Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-                Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+                Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+                Account(alias="private", email="c@d.example", server="imap.ionos.de"),
             ),
         )
     )
@@ -338,7 +338,7 @@ def test_config_remove_unknown_fails(cfg_env):
     save_config(
         Config(
             default="work",
-            accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
         )
     )
     runner = CliRunner()

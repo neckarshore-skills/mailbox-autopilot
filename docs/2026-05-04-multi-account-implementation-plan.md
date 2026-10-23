@@ -125,7 +125,7 @@ from mailbox_cleanup.config import derive_alias_from_email
 
 
 def test_derive_alias_simple():
-    assert derive_alias_from_email("german@rauhut.com") == "german"
+    assert derive_alias_from_email("owner@example.com") == "owner"
 
 
 def test_derive_alias_with_dot():
@@ -141,7 +141,7 @@ def test_derive_alias_with_underscore():
 
 
 def test_derive_alias_uppercase():
-    assert derive_alias_from_email("Germ4N@RAUHUT.com") == "germ4n"
+    assert derive_alias_from_email("Own3R@EXAMPLE.com") == "own3r"
 
 
 def test_derive_alias_invalid_email_raises():
@@ -154,7 +154,7 @@ def test_derive_alias_invalid_email_raises():
 
 
 def test_derive_alias_strips_leading_non_alnum():
-    assert derive_alias_from_email("-foo@x.de") == "foo"
+    assert derive_alias_from_email("-foo@x.example") == "foo"
 ```
 
 - [ ] **Step 2: Verify tests fail**
@@ -228,7 +228,7 @@ from mailbox_cleanup.config import Account, Config, validate_config
 
 
 def test_account_dataclass_defaults():
-    a = Account(alias="work", email="x@y.de", server="imap.ionos.de")
+    a = Account(alias="work", email="x@y.example", server="imap.ionos.de")
     assert a.port == 993
     assert a.provider == "ionos"  # auto-derived
 
@@ -236,7 +236,7 @@ def test_account_dataclass_defaults():
 def test_account_explicit_provider_wins():
     a = Account(
         alias="weird",
-        email="x@y.de",
+        email="x@y.example",
         server="some.host.tld",
         provider="custom",
     )
@@ -248,7 +248,7 @@ def test_validate_config_happy_path():
         "schema_version": 1,
         "default": "work",
         "accounts": [
-            {"alias": "work", "email": "a@b.de", "server": "imap.ionos.de"}
+            {"alias": "work", "email": "a@b.example", "server": "imap.ionos.de"}
         ],
     }
     cfg = validate_config(data)
@@ -268,7 +268,7 @@ def test_validate_config_unknown_default_raises():
     data = {
         "schema_version": 1,
         "default": "missing",
-        "accounts": [{"alias": "work", "email": "a@b.de", "server": "x"}],
+        "accounts": [{"alias": "work", "email": "a@b.example", "server": "x"}],
     }
     with pytest.raises(ConfigError, match="default"):
         validate_config(data)
@@ -279,8 +279,8 @@ def test_validate_config_duplicate_alias_raises():
         "schema_version": 1,
         "default": "work",
         "accounts": [
-            {"alias": "work", "email": "a@b.de", "server": "x"},
-            {"alias": "work", "email": "c@d.de", "server": "y"},
+            {"alias": "work", "email": "a@b.example", "server": "x"},
+            {"alias": "work", "email": "c@d.example", "server": "y"},
         ],
     }
     with pytest.raises(ConfigError, match="duplicate.*alias"):
@@ -292,8 +292,8 @@ def test_validate_config_duplicate_email_raises():
         "schema_version": 1,
         "default": "a",
         "accounts": [
-            {"alias": "a", "email": "x@y.de", "server": "s"},
-            {"alias": "b", "email": "x@y.de", "server": "s"},
+            {"alias": "a", "email": "x@y.example", "server": "s"},
+            {"alias": "b", "email": "x@y.example", "server": "s"},
         ],
     }
     with pytest.raises(ConfigError, match="duplicate.*email"):
@@ -305,7 +305,7 @@ def test_validate_config_bad_alias_regex_raises():
         "schema_version": 1,
         "default": "Bad-Alias",
         "accounts": [
-            {"alias": "Bad-Alias", "email": "a@b.de", "server": "x"}
+            {"alias": "Bad-Alias", "email": "a@b.example", "server": "x"}
         ],
     }
     with pytest.raises(ConfigError, match="alias"):
@@ -476,7 +476,7 @@ def test_save_and_load_roundtrip(tmp_path, monkeypatch):
     cfg = Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
         ),
     )
     save_config(cfg)
@@ -520,7 +520,7 @@ def test_save_config_atomic_write(tmp_path, monkeypatch):
     # second write replaces cleanly
     save_config(Config(
         default="x",
-        accounts=(Account(alias="x", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="x", email="a@b.example", server="imap.ionos.de"),),
     ))
     data = json.loads(p.read_text())
     assert data["default"] == "x"
@@ -626,7 +626,7 @@ from mailbox_cleanup.config import (
 
 def _cfg(*aliases, default=None):
     accounts = tuple(
-        Account(alias=a, email=f"{a}@x.de", server="imap.ionos.de")
+        Account(alias=a, email=f"{a}@x.example", server="imap.ionos.de")
         for a in aliases
     )
     return Config(default=default, accounts=accounts)
@@ -639,7 +639,7 @@ def test_resolve_by_flag_alias():
 
 def test_resolve_by_flag_email():
     cfg = _cfg("work", "private", default="work")
-    assert resolve_account(cfg, flag="private@x.de", env=None).alias == "private"
+    assert resolve_account(cfg, flag="private@x.example", env=None).alias == "private"
 
 
 def test_resolve_by_env_when_no_flag():
@@ -789,8 +789,8 @@ def test_bootstrap_creates_config_for_known_email(tmp_path, monkeypatch):
     p = tmp_path / "cfg.json"
     monkeypatch.setenv(DEFAULT_CONFIG_PATH_ENV, str(p))
     fake_kr = {
-        ("mailbox-cleanup", "german@rauhut.com"): "secret",
-        ("mailbox-cleanup", "imap-server:german@rauhut.com"): "imap.ionos.de",
+        ("mailbox-cleanup", "owner@example.com"): "secret",
+        ("mailbox-cleanup", "imap-server:owner@example.com"): "imap.ionos.de",
     }
 
     def fake_get(service, key):
@@ -802,20 +802,20 @@ def test_bootstrap_creates_config_for_known_email(tmp_path, monkeypatch):
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.side_effect = fake_get
         kr.delete_password.side_effect = fake_delete
-        cfg = bootstrap_from_v01_keychain("german@rauhut.com")
+        cfg = bootstrap_from_v01_keychain("owner@example.com")
 
-    assert cfg.default == "german"
-    assert cfg.accounts[0].alias == "german"
-    assert cfg.accounts[0].email == "german@rauhut.com"
+    assert cfg.default == "owner"
+    assert cfg.accounts[0].alias == "owner"
+    assert cfg.accounts[0].email == "owner@example.com"
     assert cfg.accounts[0].server == "imap.ionos.de"
     assert cfg.accounts[0].provider == "ionos"
     # config persisted
     loaded = load_config()
-    assert loaded.default == "german"
+    assert loaded.default == "owner"
     # imap-server entry deleted from "Keychain"
-    assert ("mailbox-cleanup", "imap-server:german@rauhut.com") not in fake_kr
+    assert ("mailbox-cleanup", "imap-server:owner@example.com") not in fake_kr
     # password entry preserved
-    assert ("mailbox-cleanup", "german@rauhut.com") in fake_kr
+    assert ("mailbox-cleanup", "owner@example.com") in fake_kr
 
 
 def test_bootstrap_unknown_email_raises(tmp_path, monkeypatch):
@@ -824,20 +824,20 @@ def test_bootstrap_unknown_email_raises(tmp_path, monkeypatch):
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.return_value = None
         with pytest.raises(ConfigError, match="no v0.1 credentials"):
-            bootstrap_from_v01_keychain("nobody@x.de")
+            bootstrap_from_v01_keychain("nobody@x.example")
 
 
 def test_bootstrap_default_server_when_imap_server_key_missing(tmp_path, monkeypatch):
     p = tmp_path / "cfg.json"
     monkeypatch.setenv(DEFAULT_CONFIG_PATH_ENV, str(p))
-    fake_kr = {("mailbox-cleanup", "user@x.de"): "pw"}
+    fake_kr = {("mailbox-cleanup", "user@x.example"): "pw"}
 
     def fake_get(service, key):
         return fake_kr.get((service, key))
 
     with patch("mailbox_cleanup.config.keyring") as kr:
         kr.get_password.side_effect = fake_get
-        cfg = bootstrap_from_v01_keychain("user@x.de")
+        cfg = bootstrap_from_v01_keychain("user@x.example")
 
     assert cfg.accounts[0].server == "imap.ionos.de"
 ```
@@ -944,8 +944,8 @@ def _make_existing_config(tmp_path, monkeypatch, *, default="work"):
     save_config(Config(
         default=default,
         accounts=(
-            Account(alias="work", email="work@x.de", server="imap.ionos.de"),
-            Account(alias="private", email="priv@y.de", server="imap.ionos.de"),
+            Account(alias="work", email="work@x.example", server="imap.ionos.de"),
+            Account(alias="private", email="priv@y.example", server="imap.ionos.de"),
         ),
     ))
     return p
@@ -961,22 +961,22 @@ def _patch_keyring(passwords: dict):
 def test_resolves_via_account_flag(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_keyring({"work@x.de": "pw1", "priv@y.de": "pw2"}):
+    with _patch_keyring({"work@x.example": "pw1", "priv@y.example": "pw2"}):
         account, creds = resolve_account_and_credentials(
             account_flag="private", email_flag=None
         )
     assert account.alias == "private"
-    assert creds.email == "priv@y.de"
+    assert creds.email == "priv@y.example"
     assert creds.password == "pw2"
 
 
 def test_email_flag_used_as_account_with_deprecation_warning(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_keyring({"work@x.de": "pw1", "priv@y.de": "pw2"}):
+    with _patch_keyring({"work@x.example": "pw1", "priv@y.example": "pw2"}):
         with pytest.warns(DeprecationWarning, match="--email is deprecated"):
             account, _ = resolve_account_and_credentials(
-                account_flag=None, email_flag="work@x.de"
+                account_flag=None, email_flag="work@x.example"
             )
     assert account.alias == "work"
 
@@ -984,9 +984,9 @@ def test_email_flag_used_as_account_with_deprecation_warning(tmp_path, monkeypat
 def test_account_flag_overrides_email_flag(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
-    with _patch_keyring({"work@x.de": "p", "priv@y.de": "p"}):
+    with _patch_keyring({"work@x.example": "p", "priv@y.example": "p"}):
         account, _ = resolve_account_and_credentials(
-            account_flag="private", email_flag="work@x.de"
+            account_flag="private", email_flag="work@x.example"
         )
     assert account.alias == "private"
 
@@ -994,7 +994,7 @@ def test_account_flag_overrides_email_flag(tmp_path, monkeypatch):
 def test_env_var_used_when_no_flags(tmp_path, monkeypatch):
     _make_existing_config(tmp_path, monkeypatch)
     monkeypatch.setenv("MAILBOX_CLEANUP_ACCOUNT", "private")
-    with _patch_keyring({"work@x.de": "p", "priv@y.de": "p"}):
+    with _patch_keyring({"work@x.example": "p", "priv@y.example": "p"}):
         account, _ = resolve_account_and_credentials(
             account_flag=None, email_flag=None
         )
@@ -1007,19 +1007,19 @@ def test_auto_bootstrap_when_no_config_and_email_flag(tmp_path, monkeypatch, cap
     monkeypatch.delenv("MAILBOX_CLEANUP_ACCOUNT", raising=False)
     assert not p.exists()
     with patch("mailbox_cleanup.config.keyring") as cfg_kr, _patch_keyring(
-        {"german@rauhut.com": "pw"}
+        {"owner@example.com": "pw"}
     ):
         cfg_kr.get_password.side_effect = lambda service, key: {
-            ("mailbox-cleanup", "german@rauhut.com"): "pw",
-            ("mailbox-cleanup", "imap-server:german@rauhut.com"): "imap.ionos.de",
+            ("mailbox-cleanup", "owner@example.com"): "pw",
+            ("mailbox-cleanup", "imap-server:owner@example.com"): "imap.ionos.de",
         }.get((service, key))
         cfg_kr.delete_password.return_value = None
         with pytest.warns(DeprecationWarning):
             account, creds = resolve_account_and_credentials(
-                account_flag=None, email_flag="german@rauhut.com"
+                account_flag=None, email_flag="owner@example.com"
             )
     assert p.exists()
-    assert account.alias == "german"
+    assert account.alias == "owner"
     assert creds.password == "pw"
     err = capsys.readouterr().err
     assert "Migrated to multi-account config" in err
@@ -1200,8 +1200,8 @@ def test_config_list_json(cfg_env):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-            Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+            Account(alias="private", email="c@d.example", server="imap.ionos.de"),
         ),
     ))
     runner = CliRunner()
@@ -1215,7 +1215,7 @@ def test_config_list_json(cfg_env):
 def test_config_show_default(cfg_env):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     ))
     runner = CliRunner()
     r = runner.invoke(cli, ["config", "show", "--json"])
@@ -1228,8 +1228,8 @@ def test_config_show_specific_alias(cfg_env):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-            Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+            Account(alias="private", email="c@d.example", server="imap.ionos.de"),
         ),
     ))
     runner = CliRunner()
@@ -1241,7 +1241,7 @@ def test_config_show_specific_alias(cfg_env):
 def test_config_show_unknown_alias_fails(cfg_env):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     ))
     runner = CliRunner()
     r = runner.invoke(cli, ["config", "show", "nope", "--json"])
@@ -1253,8 +1253,8 @@ def test_config_set_default(cfg_env):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-            Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+            Account(alias="private", email="c@d.example", server="imap.ionos.de"),
         ),
     ))
     runner = CliRunner()
@@ -1266,7 +1266,7 @@ def test_config_set_default(cfg_env):
 def test_config_set_default_unknown_fails(cfg_env):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     ))
     runner = CliRunner()
     r = runner.invoke(cli, ["config", "set-default", "nope"])
@@ -1276,7 +1276,7 @@ def test_config_set_default_unknown_fails(cfg_env):
 def test_config_rename(cfg_env):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     ))
     runner = CliRunner()
     r = runner.invoke(cli, ["config", "rename", "work", "office"])
@@ -1290,8 +1290,8 @@ def test_config_remove_also_clears_keychain(cfg_env, monkeypatch):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-            Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+            Account(alias="private", email="c@d.example", server="imap.ionos.de"),
         ),
     ))
     deleted = []
@@ -1307,15 +1307,15 @@ def test_config_remove_also_clears_keychain(cfg_env, monkeypatch):
     cfg = load_config()
     assert [a.alias for a in cfg.accounts] == ["work"]
     # password deletion attempted for the removed account
-    assert any("c@d.de" in str(k) for _, k in deleted)
+    assert any("c@d.example" in str(k) for _, k in deleted)
 
 
 def test_config_remove_default_clears_default_field(cfg_env, monkeypatch):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-            Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+            Account(alias="private", email="c@d.example", server="imap.ionos.de"),
         ),
     ))
     monkeypatch.setattr(
@@ -1567,7 +1567,7 @@ def test_auth_set_with_alias_creates_account(cfg_env):
                 "--alias",
                 "work",
                 "--email",
-                "a@b.de",
+                "a@b.example",
                 "--server",
                 "imap.ionos.de",
                 "--make-default",
@@ -1575,24 +1575,24 @@ def test_auth_set_with_alias_creates_account(cfg_env):
             input="secret\n",
         )
     assert r.exit_code == 0, r.output
-    setcreds.assert_called_once_with("a@b.de", "secret", "imap.ionos.de")
+    setcreds.assert_called_once_with("a@b.example", "secret", "imap.ionos.de")
     cfg = load_config()
     assert cfg.default == "work"
     assert cfg.accounts[0].alias == "work"
-    assert cfg.accounts[0].email == "a@b.de"
+    assert cfg.accounts[0].email == "a@b.example"
     assert cfg.accounts[0].provider == "ionos"
 
 
 def test_auth_set_duplicate_alias_fails(cfg_env):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     ))
     runner = CliRunner()
     with patch("mailbox_cleanup.cli.set_credentials"):
         r = runner.invoke(
             cli,
-            ["auth", "set", "--alias", "work", "--email", "z@z.de"],
+            ["auth", "set", "--alias", "work", "--email", "z@z.example"],
             input="x\n",
         )
     assert r.exit_code != 0
@@ -1606,19 +1606,19 @@ def test_auth_set_legacy_no_alias_uses_email_local_part(cfg_env):
     with patch("mailbox_cleanup.cli.set_credentials"):
         r = runner.invoke(
             cli,
-            ["auth", "set", "--email", "german@rauhut.com"],
+            ["auth", "set", "--email", "owner@example.com"],
             input="pw\n",
         )
     assert r.exit_code == 0, r.output
     cfg = load_config()
-    assert cfg.accounts[0].alias == "german"
-    assert cfg.default == "german"  # single account becomes default automatically
+    assert cfg.accounts[0].alias == "owner"
+    assert cfg.default == "owner"  # single account becomes default automatically
 
 
 def test_auth_test_by_account(cfg_env):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="a@b.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
     ))
     runner = CliRunner()
     with patch("mailbox_cleanup.cli.imap_connect") as imap, patch(
@@ -1635,8 +1635,8 @@ def test_auth_delete_by_account_removes_both(cfg_env):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="a@b.de", server="imap.ionos.de"),
-            Account(alias="private", email="c@d.de", server="imap.ionos.de"),
+            Account(alias="work", email="a@b.example", server="imap.ionos.de"),
+            Account(alias="private", email="c@d.example", server="imap.ionos.de"),
         ),
     ))
     runner = CliRunner()
@@ -1810,11 +1810,11 @@ Append to `tests/test_cli_auth_multi.py` (or a new file `tests/test_cli_data_acc
 def test_scan_uses_account_flag(cfg_env, monkeypatch):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="w@x.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="w@x.example", server="imap.ionos.de"),),
     ))
     monkeypatch.setattr(
         "mailbox_cleanup.auth.keyring.get_password",
-        lambda s, k: "pw" if k == "w@x.de" else None,
+        lambda s, k: "pw" if k == "w@x.example" else None,
     )
 
     seen_creds = {}
@@ -1839,15 +1839,15 @@ def test_scan_uses_account_flag(cfg_env, monkeypatch):
     runner = CliRunner()
     r = runner.invoke(cli, ["scan", "--account", "work", "--json"])
     assert r.exit_code == 0, r.output
-    assert seen_creds["email"] == "w@x.de"
+    assert seen_creds["email"] == "w@x.example"
 
 
 def test_scan_falls_back_to_default(cfg_env, monkeypatch):
     save_config(Config(
         default="work",
         accounts=(
-            Account(alias="work", email="w@x.de", server="imap.ionos.de"),
-            Account(alias="private", email="p@y.de", server="imap.ionos.de"),
+            Account(alias="work", email="w@x.example", server="imap.ionos.de"),
+            Account(alias="private", email="p@y.example", server="imap.ionos.de"),
         ),
     ))
     monkeypatch.setattr(
@@ -1872,13 +1872,13 @@ def test_scan_falls_back_to_default(cfg_env, monkeypatch):
     runner = CliRunner()
     r = runner.invoke(cli, ["scan", "--json"])
     assert r.exit_code == 0
-    assert used["email"] == "w@x.de"  # default account
+    assert used["email"] == "w@x.example"  # default account
 
 
 def test_scan_email_flag_emits_deprecation(cfg_env, monkeypatch):
     save_config(Config(
         default="work",
-        accounts=(Account(alias="work", email="w@x.de", server="imap.ionos.de"),),
+        accounts=(Account(alias="work", email="w@x.example", server="imap.ionos.de"),),
     ))
     monkeypatch.setattr(
         "mailbox_cleanup.auth.keyring.get_password", lambda s, k: "pw"
@@ -1893,7 +1893,7 @@ def test_scan_email_flag_emits_deprecation(cfg_env, monkeypatch):
         })(),
     )
     runner = CliRunner()
-    r = runner.invoke(cli, ["scan", "--email", "w@x.de", "--json"])
+    r = runner.invoke(cli, ["scan", "--email", "w@x.example", "--json"])
     assert r.exit_code == 0
     # DeprecationWarning is captured by pytest only with -W; for CLI tests we
     # assert the operation still works. Stronger check is in test_cli_helpers.
@@ -1989,7 +1989,7 @@ def test_log_action_appends_jsonl(tmp_audit):
     log_action(
         subcommand="delete",
         account="work",
-        args={"sender": "x@y.com", "older_than": "6m"},
+        args={"sender": "x@y.example", "older_than": "6m"},
         folder="INBOX",
         affected_uids=["1", "2", "3"],
         result="success",
@@ -2014,7 +2014,7 @@ def test_log_action_records_failure(tmp_audit):
     log_action(
         subcommand="delete",
         account="work",
-        args={"sender": "x@y.com"},
+        args={"sender": "x@y.example"},
         folder="INBOX",
         affected_uids=[],
         result="failure",
@@ -2301,7 +2301,7 @@ All must pass. Test count should be ≥ 59 (v0.1 baseline) plus the new tests ad
 
 ```bash
 # Auto-bootstrap from v0.1 — runs the migration once
-mailbox-cleanup scan --email=german@rauhut.com --json | head -20
+mailbox-cleanup scan --email=owner@example.com --json | head -20
 
 # After bootstrap, --account works
 mailbox-cleanup config list

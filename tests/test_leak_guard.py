@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -307,3 +308,120 @@ def test_binary_added_line_in_non_allowlisted_path_is_still_scanned(tmp_path, mo
     out = capsys.readouterr().out
     assert rc in (0, 1)
     assert "1 added line(s) scanned" in out
+
+
+# --- #74: reserved .invalid, vendor system addresses, local deny list, full tree -------
+
+
+def test_the_reserved_invalid_domain_passes():
+    assert _scan("Delivery failed for example@nowhere.invalid.\n") == []
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "newsletter@linkedin.com",
+        "newsletter-1@linkedin.com",
+        "noreply@github.com",
+        "notifications@github.com",
+        "automated-1@github.com",
+        "MAILER-DAEMON@ionos.de",
+        "bounce-1@ionos.de",
+        "noreply@ionos.de",
+        "news@medium.com",
+    ],
+)
+def test_listed_vendor_system_addresses_pass(addr):
+    assert _scan(f"From: {addr}\n") == []
+
+
+@pytest.mark.parametrize("addr", ["jane.doe@linkedin.com", "jane@github.com", "kim@ionos.de"])
+def test_a_person_at_a_vendor_domain_still_hits(addr):
+    """The list names system mailboxes, not domains: a person there is personal data."""
+    hits = _scan(f"From: {addr}\n")
+    assert [h.label for h in hits] == ["email"]
+
+
+def _git_tree(tmp_path, files):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for name, text in files.items():
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+
+
+def test_tree_mode_scans_every_tracked_file(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"docs/old.md": "jane.doe@some-company.test\n", "ok.py": "x = 1\n"})
+    (tmp_path / "untracked.md").write_text("jane.doe@some-company.test\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    rc = lg.main(["--tree"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "docs/old.md:1: email" in out
+    assert "untracked.md" not in out  # only what git tracks is shipped
+    assert "2 file(s) scanned" in out
+
+
+def test_tree_mode_with_a_clean_tree_passes(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"a.py": "x = 'anna@example.com'\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--tree"]) == 0
+    assert "1 file(s) scanned, 0 hit(s)" in capsys.readouterr().out
+
+
+def test_an_unknown_option_is_refused_not_read_as_a_file(tmp_path, monkeypatch, capsys):
+    """A mistyped mode must not scan nothing and pass."""
+    monkeypatch.chdir(tmp_path)
+    assert lg.main(["--tre"]) == 2
+
+
+def test_the_local_deny_list_is_read_and_never_printed(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"notes.md": "host: mail.private-host.example\n"})
+    (tmp_path / ".leakguard-local.txt").write_text(
+        "# local, git-ignored\nprivate-host\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    rc = lg.main(["--tree"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "notes.md:1: private-list hit" in out
+    assert "private-host" not in out
+    assert "public patterns only" not in out
+
+
+def test_the_local_deny_list_is_not_scanned_itself(tmp_path, monkeypatch, capsys):
+    """Even if someone force-adds it, the list must not flag its own entries."""
+    _git_tree(tmp_path, {".leakguard-local.txt": "private-host\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--tree"]) == 0
+    assert "0 file(s) scanned" in capsys.readouterr().out
+
+
+def test_the_local_deny_list_is_git_ignored():
+    root = Path(__file__).parent.parent
+    assert ".leakguard-local.txt" in (root / ".gitignore").read_text(encoding="utf-8").split()
+
+
+def test_the_repository_tree_is_clean():
+    """The gate itself, on this repository: every tracked file, public patterns.
+    CI runs the same scan with the private list as well."""
+    import subprocess
+
+    root = Path(__file__).parent.parent
+    r = subprocess.run(
+        [sys.executable, str(root / "scripts" / "leak_guard.py"), "--tree"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert r.returncode == 0, r.stdout
+    scanned = int(re.search(r"(\d+) file\(s\) scanned", r.stdout).group(1))
+    assert scanned > 100, r.stdout  # the tree, not an empty list

@@ -16,7 +16,7 @@ def test_log_action_appends_jsonl(tmp_audit):
     log_action(
         subcommand="delete",
         account="work",
-        args={"sender": "x@y.com", "older_than": "6m"},
+        args={"sender": "x@y.example", "older_than": "6m"},
         folder="INBOX",
         affected_uids=["1", "2", "3"],
         result="success",
@@ -47,7 +47,7 @@ def test_log_action_records_failure(tmp_audit):
     log_action(
         subcommand="delete",
         account="work",
-        args={"sender": "x@y.com"},
+        args={"sender": "x@y.example"},
         folder="INBOX",
         affected_uids=[],
         result="failure",

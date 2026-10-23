@@ -10,3 +10,4 @@ build/
 *.egg-info/
 .venv/
 .env
+.leakguard-local.txt

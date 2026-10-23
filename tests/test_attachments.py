@@ -11,7 +11,7 @@ from mailbox_cleanup.operations.attachments import find_large_messages
 def _msg(uid, size, date):
     m = MagicMock()
     m.uid = uid
-    m.from_ = "x@y.com"
+    m.from_ = "x@y.example"
     m.subject = "huge"
     m.size = size
     m.date = date
