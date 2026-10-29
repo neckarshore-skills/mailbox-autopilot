@@ -8,7 +8,8 @@ from dataclasses import replace as dc_replace
 import click
 
 from . import SCHEMA_VERSION
-from .audit import log_action, repair_permissions
+from . import profile as bot_profile
+from .audit import log_action, log_refusal, repair_permissions
 from .auth import (
     AuthMissingError,
     delete_credentials,
@@ -80,7 +81,62 @@ def _fail(payload: dict, exit_code: int, json_mode: bool) -> None:
     sys.exit(exit_code)
 
 
-@click.group()
+def _command_path(group: click.Group, argv: list[str]) -> str:
+    """The known command names at the front of argv ("manage search"), or "unknown".
+    Never an option and never a value: the record must not carry what the caller typed."""
+    names: list[str] = []
+    cmd: click.Command = group
+    for token in argv:
+        if not isinstance(cmd, click.Group) or token not in cmd.commands:
+            break
+        names.append(token)
+        cmd = cmd.commands[token]
+    return " ".join(names) or "unknown"
+
+
+def _refuse_for_profile(group: click.Group, argv: list[str], e: Exception, rule: str) -> None:
+    """Audit, answer in JSON (no option is parsed yet, so --json is unknown), exit 6. The
+    refusal never depends on the audit write."""
+    uid = os.getuid()
+    sha = getattr(e, "sha256", None)
+    try:
+        log_refusal(
+            home=bot_profile._home_of(uid),
+            command=_command_path(group, argv),
+            rule=rule,
+            caller_uid=uid,
+            profile_sha256=sha,
+        )
+    except Exception as err:  # noqa: BLE001 -- any failure here must not unblock
+        click.echo(f"warning: could not write the refusal to the audit log: {err}", err=True)
+    payload = {"ok": False, "error_code": "profile_refused", "rule": rule, "message": str(e)}
+    click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    sys.exit(bot_profile.REFUSED_EXIT)
+
+
+class _ProfileGuardedGroup(click.Group):
+    """#76: the bot-profile gate runs in main(), before click parses anything. A check in
+    the group callback would come after command resolution, so an unknown command or a
+    group option (--help, --version, --bogus) would exit 2 with usage text and no audit
+    line. A failing check refuses; it never lets through."""
+
+    def main(self, args=None, *rest, **kwargs):
+        argv = [str(a) for a in (sys.argv[1:] if args is None else args)]
+        try:
+            bot_profile.cli_gate(os.getuid())
+        except bot_profile.ProfileRefused as e:
+            _refuse_for_profile(self, argv, e, e.rule)
+        except Exception as e:  # noqa: BLE001 -- fail closed
+            _refuse_for_profile(
+                self,
+                argv,
+                RuntimeError(f"the profile check failed: {type(e).__name__}"),
+                "gate_error",
+            )
+        return super().main(args, *rest, **kwargs)
+
+
+@click.group(cls=_ProfileGuardedGroup)
 @click.version_option(package_name="mailbox-autopilot")
 def cli():
     """Clean up an IMAP mailbox and draft replies. Never sends mail."""
