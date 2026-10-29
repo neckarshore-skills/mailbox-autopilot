@@ -616,14 +616,33 @@ def _require_filter(sender, subject_contains, older_than, json_mode, recipient=N
         )
 
 
-def _selection_options(f):
-    """Filters shared by delete and move (#50). Applied bottom-up by click."""
-    f = click.option(
+def _expect_count_option(f):
+    """--expect-count: binds --apply to the confirmed preview (delete/move #54, the bulk
+    commands #55). Ignored on a dry-run."""
+    return click.option(
         "--expect-count",
         type=int,
         default=None,
         help="With --apply: the affected_count the user confirmed. Refuses if it changed.",
     )(f)
+
+
+def _fail_preview_mismatch(e: PreviewMismatchError, json_mode: bool) -> None:
+    _fail(
+        {
+            "error_code": "preview_mismatch",
+            "message": str(e),
+            "expected": e.expected,
+            "found": e.found,
+        },
+        4,
+        json_mode,
+    )
+
+
+def _selection_options(f):
+    """Filters shared by delete and move (#50). Applied bottom-up by click."""
+    f = _expect_count_option(f)
     f = click.option("--limit", default=None, type=int)(f)
     f = click.option(
         "--keep",
@@ -669,16 +688,7 @@ def _run_selection_action(*, subcommand, account, json_mode, apply, folder, args
         with imap_connect(account[1], port=account[0].port) as mb:
             res = run(mb)
     except PreviewMismatchError as e:
-        _fail(
-            {
-                "error_code": "preview_mismatch",
-                "message": str(e),
-                "expected": e.expected,
-                "found": e.found,
-            },
-            4,
-            json_mode,
-        )
+        _fail_preview_mismatch(e, json_mode)
         return
     except PartialMoveError as e:
         log_action(
@@ -872,9 +882,10 @@ def move_cmd(
 @click.option("--email", "email_flag", default=None, help="Deprecated; use --account.")
 @click.option("--folder", default="INBOX", show_default=True, callback=_no_control)
 @click.option("--older-than", required=True, help="e.g. 12m, 2y")
+@_expect_count_option
 @click.option("--apply", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
-def archive_cmd(account_flag, email_flag, folder, older_than, apply, json_mode):
+def archive_cmd(account_flag, email_flag, folder, older_than, expect_count, apply, json_mode):
     """Bulk-move messages older than N into Archive/YYYY subfolders."""
     try:
         account, creds = resolve_account_and_credentials(
@@ -888,7 +899,12 @@ def archive_cmd(account_flag, email_flag, folder, older_than, apply, json_mode):
         return
     try:
         with imap_connect(creds, port=account.port) as mb:
-            res = run_archive(mb, folder=folder, older_than=older_than, apply=apply)
+            res = run_archive(
+                mb, folder=folder, older_than=older_than, apply=apply, expect_count=expect_count
+            )
+    except PreviewMismatchError as e:
+        _fail_preview_mismatch(e, json_mode)
+        return
     except Exception as e:
         _fail({"error_code": "operation_error", "message": str(e)}, 2, json_mode)
         return
@@ -925,9 +941,10 @@ def archive_cmd(account_flag, email_flag, folder, older_than, apply, json_mode):
 @click.option("--account", "account_flag", default=None, help="Alias or email.")
 @click.option("--email", "email_flag", default=None, help="Deprecated; use --account.")
 @click.option("--folder", default="INBOX", show_default=True, callback=_no_control)
+@_expect_count_option
 @click.option("--apply", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
-def dedupe_cmd(account_flag, email_flag, folder, apply, json_mode):
+def dedupe_cmd(account_flag, email_flag, folder, expect_count, apply, json_mode):
     """Move duplicate-by-Message-ID copies to Trash, keep the oldest."""
     try:
         account, creds = resolve_account_and_credentials(
@@ -941,7 +958,10 @@ def dedupe_cmd(account_flag, email_flag, folder, apply, json_mode):
         return
     try:
         with imap_connect(creds, port=account.port) as mb:
-            res = run_dedupe(mb, folder=folder, apply=apply)
+            res = run_dedupe(mb, folder=folder, apply=apply, expect_count=expect_count)
+    except PreviewMismatchError as e:
+        _fail_preview_mismatch(e, json_mode)
+        return
     except Exception as e:
         _fail({"error_code": "operation_error", "message": str(e)}, 2, json_mode)
         return
@@ -953,6 +973,8 @@ def dedupe_cmd(account_flag, email_flag, folder, apply, json_mode):
         "folder": res.folder,
         "target_folder": res.target_folder,
         "duplicate_count": len(res.duplicate_uids),
+        # the number --expect-count takes, named as on every other bulk command (#55)
+        "affected_count": len(res.duplicate_uids),
         "groups": res.groups,
     }
     if apply:
@@ -1164,9 +1186,10 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
 @click.option("--account", "account_flag", default=None, help="Alias or email.")
 @click.option("--email", "email_flag", default=None, help="Deprecated; use --account.")
 @click.option("--folder", default="INBOX", show_default=True, callback=_no_control)
+@_expect_count_option
 @click.option("--apply", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
-def bounces_cmd(account_flag, email_flag, folder, apply, json_mode):
+def bounces_cmd(account_flag, email_flag, folder, expect_count, apply, json_mode):
     """Find bounce/auto-reply messages, optionally move to Trash."""
     try:
         account, creds = resolve_account_and_credentials(
@@ -1180,7 +1203,12 @@ def bounces_cmd(account_flag, email_flag, folder, apply, json_mode):
         return
     try:
         with imap_connect(creds, port=account.port) as mb:
-            res = run_bounces(mb, folder=folder, apply=apply, keep=account.keep)
+            res = run_bounces(
+                mb, folder=folder, apply=apply, keep=account.keep, expect_count=expect_count
+            )
+    except PreviewMismatchError as e:
+        _fail_preview_mismatch(e, json_mode)
+        return
     except Exception as e:
         _fail({"error_code": "operation_error", "message": str(e)}, 2, json_mode)
         return

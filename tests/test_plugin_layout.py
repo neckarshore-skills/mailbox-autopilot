@@ -132,7 +132,9 @@ def test_cleanup_skill_states_the_cli_only_boundary():
     text = CLEANUP.read_text(encoding="utf-8")
     assert "Messages are moved, deleted or flagged **only through the CLI**." in text
     assert "**Never change messages outside the CLI.**" in text
-    assert "**Every `delete --apply` and `move --apply` carries `--expect-count`**" in text
+    assert (
+        "**Every `--apply` of `archive`, `bounces`, `dedupe`, `delete` and `move` carries" in text
+    )
 
 
 def test_skill_names_exactly_the_commands_that_take_expect_count():
@@ -146,9 +148,9 @@ def test_skill_names_exactly_the_commands_that_take_expect_count():
         for name, cmd in cli.commands.items()
         if any(p.name == "expect_count" for p in cmd.params)
     }
-    assert with_flag == {"delete", "move"}, with_flag
+    assert with_flag == {"archive", "bounces", "dedupe", "delete", "move"}, with_flag
     text = CLEANUP.read_text(encoding="utf-8")
-    assert "do not accept the flag yet" in text
+    assert "`unsubscribe` does not accept the flag" in text
 
 
 def test_manage_skill_bounds_a_new_mail():

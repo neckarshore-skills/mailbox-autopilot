@@ -237,11 +237,11 @@ If only one account is configured, `--account` can be omitted.
 | `senders` | List top-N senders by count | `--top=50` | n/a (read-only) |
 | `delete` | Soft-delete (move to Trash) by filter | one of `--sender=` (repeatable) / `--subject-contains=` / `--older-than=` / `--recipient=` / `--category=`; optional `--keep=` (repeatable), `--expect-count=` | yes |
 | `move` | Move by filter to target folder | `--to=Folder` plus the same filters as `delete` | yes |
-| `archive` | Bulk-move messages older than N → `Archive/YYYY` | `--older-than=12m` | yes |
+| `archive` | Bulk-move messages older than N → `Archive/YYYY` | `--older-than=12m`; optional `--expect-count=` | yes |
 | `unsubscribe` | Parse `List-Unsubscribe` header, execute HTTPS one-click only; `mailto:`-only senders are listed under `manual_unsubscribe` and their mail is kept (the package sends no mail). If the HTTPS unsubscribe fails (since 0.4.1), the mail is kept as well, the command exits 5 with `unsubscribe_failed`, and the failed link plus any `mailto:` alternative come back under `manual_unsubscribe`; a link the egress guard refused as unsafe comes back under `refused_unsubscribe` instead and is never offered for manual handling | `--sender=` | yes |
-| `dedupe` | Drop Message-ID duplicates, keep oldest | `--folder=` | yes |
+| `dedupe` | Drop Message-ID duplicates, keep oldest | `--folder=`; optional `--expect-count=` | yes |
 | `attachments` | List large messages (v1) — strip is v2 | `--size-gt=10mb` | n/a (read-only v1) |
-| `bounces` | Find bounce / auto-reply messages | `--folder=INBOX` | yes |
+| `bounces` | Find bounce / auto-reply messages | `--folder=INBOX`; optional `--expect-count=` | yes |
 
 **Common flags:** `--account=<alias|email>` (account selector), `--json` (structured output), `--apply` (execute, default off), `--folder=` (target IMAP folder), `--limit=N` (cap operation size).
 
@@ -255,7 +255,7 @@ If only one account is configured, `--account` can be omitted.
 
 **Persistent keep list (since 0.5.0):** each account can carry its own keep list in `config.json`, maintained with `config keep add|remove|list [--account=<alias>]`. `delete`, `move`, `unsubscribe` and `bounces` on that account leave mail from those senders alone; for `delete` and `move` the list adds to any `--keep` flags. The dry-run shows `kept_by_config` (how many of `kept_count` the account's list kept) and `keep_config` (the list itself), and the audit log records it under `args.keep_config`. `dedupe` always keeps one copy and `archive` only moves within the mailbox, so neither consults the list. An entry that is neither an address nor `@domain` makes every command stop before connecting with `bad_config` (exit 4). A CLI older than 0.5.0 ignores the field when reading and drops it when one of its `config` or `auth set` commands rewrites the file, and it does not apply the list on `delete`, `move`, `unsubscribe` or `bounces` either. Add the first entry only after the CLI the skill runs on that machine reports 0.5.0 (`mailbox-autopilot --version`).
 
-**Preview binding (`--expect-count`):** with `--apply`, pass the `affected_count` the dry-run showed. If the matching set changed size in between, nothing moves and the CLI exits 4 with `preview_mismatch`.
+**Preview binding (`--expect-count`):** with `--apply`, pass the `affected_count` the dry-run showed. If the matching set changed size in between, nothing moves and the CLI exits 4 with `preview_mismatch`. `delete` and `move` take it since 0.2.1 (#54); `archive`, `bounces` and `dedupe` since 0.9.0 (#55), where a refused `archive` creates no `Archive/<year>` folder either and `dedupe`'s dry-run reports `affected_count` next to `duplicate_count`. `unsubscribe` does not take it: it acts per sender and has an HTTPS side effect. On a dry-run the flag is ignored.
 
 **Large moves** run in batches of 500. If a batch fails, the CLI exits 5 with `partial_failure`, reports `moved_count` and `not_moved_count`, and the audit record lists exactly the UIDs that moved.
 
@@ -340,6 +340,7 @@ The CLI exits with a numeric code; structured errors include a stable `error` st
 | `unsubscribe_failed` | `unsubscribe --apply`: the HTTPS unsubscribe failed; no mail was moved (since 0.4.1) | 5 |
 | `bad_config` | The config file cannot be used (for example a keep entry that is neither an address nor `@domain`); nothing connects (since 0.5.0) | 4 |
 | `not_in_keep_list` | `config keep remove`: the entry is not on that account's list; nothing changed (since 0.5.0) | 4 |
+| `preview_mismatch` | `--apply` with `--expect-count`: the matching set changed size since the dry-run; nothing was moved or created | 4 |
 | `move_unsupported` | `delete` / `move --apply`: the server offers neither IMAP MOVE nor UIDPLUS, so a move could remove messages outside the selection; nothing was moved (since 0.7.2) | 5 |
 
 Generic exit codes:

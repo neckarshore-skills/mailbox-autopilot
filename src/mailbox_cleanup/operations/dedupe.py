@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from ..folders import resolve_folder
 from .batching import move_in_batches
+from .delete import check_expected
 
 
 @dataclass
@@ -17,7 +18,10 @@ class DedupeResult:
     duplicate_uids: list[str] = field(default_factory=list)
 
 
-def run_dedupe(mb, *, folder: str = "INBOX", apply: bool = False) -> DedupeResult:
+def run_dedupe(
+    mb, *, folder: str = "INBOX", apply: bool = False, expect_count: int | None = None
+) -> DedupeResult:
+    """With apply, `expect_count` binds the action to the confirmed preview (#55)."""
     target = resolve_folder(mb, "trash")
     mb.folder.set(folder)
     msgs = list(mb.fetch(headers_only=True, mark_seen=False, bulk=True))
@@ -47,6 +51,8 @@ def run_dedupe(mb, *, folder: str = "INBOX", apply: bool = False) -> DedupeResul
         groups.append({"message_id": mid, "keep": keep, "drop": drops})
         drop_uids.extend(drops)
 
+    if apply:
+        check_expected(expect_count, len(drop_uids))
     if apply and drop_uids:
         if not target:
             raise RuntimeError("Could not resolve Trash folder.")
