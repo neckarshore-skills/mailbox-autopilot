@@ -349,6 +349,22 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 8 | A failing check refuses; it never lets through | `cli._ProfileGuardedGroup.main` | `test_a_failing_gate_refuses_rather_than_lets_through` |
 | 9 | Without an installed profile and group, the CLI is unchanged, and a broken profile does not lock a non-member out | `profile.cli_gate` | `test_without_an_installed_profile_the_cli_is_unchanged`, `test_a_broken_profile_does_not_lock_out_a_non_member` |
 
+**The guard library (slice 3b, #91).** These rows hold in `src/mailbox_cleanup/guards.py`. They bind the bot once the MCP host calls them before every side effect (slice 3c); until then nothing calls them.
+
+| # | Guarantee | Code | Test (`tests/test_guards.py`) |
+|---|---|---|---|
+| 10 | A UID is plain ASCII digits from 1 to 2^32-1; `*`, ranges and anything else are refused | `guards.check_uids` | `test_a_uid_that_is_not_plain_digits_in_range_is_refused` |
+| 11 | The bot may add `\Flagged`, `\Seen` and its own `$Bot` keywords, and remove only its own keywords | `guards.check_flags` | `test_a_system_flag_outside_the_allowlist_is_refused`, `test_removing_anything_but_an_own_keyword_is_refused` |
+| 12 | Only native `MOVE`; no COPY, STORE and EXPUNGE fallback | `guards.require_native_move` | `test_a_server_without_native_move_is_refused_even_with_uidplus` |
+| 13 | A target exists in the server's `LIST` and sits in the bot namespace or is owner-listed, never a SPECIAL-USE folder and never a trash or junk name such as a created `Papierkorb` | `guards.FolderView.check_target` | `test_a_target_outside_the_allowlist_is_refused` |
+| 14 | Sources are INBOX and the namespace only, so nothing moves out of Junk, Trash, Sent, Drafts or All Mail (#76 D13) | `guards.FolderView.check_source` | `test_junk_trash_sent_drafts_all_and_foreign_folders_are_refused_as_sources` |
+| 15 | New folders only inside the namespace; folders are never deleted or renamed | `guards.FolderView.check_new_folder` | `test_a_new_folder_outside_the_namespace_or_trash_like_is_refused` |
+| 16 | The host returns no folder name outside INBOX, the namespace and the owner-listed targets | `guards.FolderView.visible` | `test_the_host_sees_only_inbox_the_namespace_and_owner_targets` |
+| 17 | The apply takes only the preview token: single use, 5 minutes, bound to the account, source, UIDVALIDITY, UIDs and target, so the same count with other messages is refused | `guards.PreviewLedger`, `guards.check_uidvalidity` | `test_the_same_count_with_a_different_uid_set_cannot_be_applied`, `test_a_changed_uidvalidity_refuses_the_apply` |
+| 18 | Caps per run and per rolling 24 hours for moves, flags, folders and drafts; in the first rollout every daily cap is 0. A cap hit is `cap_reached`, exit 7 | `guards.CapLedger` | `test_a_daily_cap_of_zero_refuses_without_touching_the_store`, `test_the_daily_cap_counts_across_runs` |
+| 19 | The keep list is checked again right before `MOVE` and `STORE`; a sender that cannot be read refuses. A keep-list hit is no proof of the sender: `From` can be spoofed | `guards.ensure_none_kept` | `test_a_kept_sender_refuses_the_whole_request_without_naming_it`, `test_a_sender_that_is_not_one_bare_address_is_refused` |
+| 20 | The bot cannot reset the 24-hour count (#76 D15): the store must be its own one-link file carrying the system append-only flag, which only root sets and clears (`chflags sappend`); the user flag is not enough. Every directory above it is root's or the bot's, and others may write one only if it is sticky, as `/tmp`. A missing store refuses instead of starting a new day. That the flag holds at the target Mac's securelevel is unmeasured until 5b | `guards.CapLedger._open_store`, `guards._is_append_only`, `guards._trusted_dir` | `test_a_store_without_the_system_append_only_flag_is_refused`, `test_the_user_append_only_flag_is_not_enough`, `test_a_sticky_directory_owned_by_someone_else_is_not_trusted`, `test_a_deleted_store_refuses_instead_of_starting_a_new_day` |
+
 ## Exit codes and error codes
 
 The CLI exits with a numeric code; structured errors include a stable `error` string in the JSON payload (when `--json` is used).
