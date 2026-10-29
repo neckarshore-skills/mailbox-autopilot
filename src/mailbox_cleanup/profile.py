@@ -122,9 +122,17 @@ def _parse(data: bytes, sha256: str) -> Profile:
         raise _invalid("bot_user may not be root")
     if not isinstance(account, str) or not account or not account.isprintable():
         raise _invalid("account must be a printable alias")
-    if level not in READ_LEVELS:
+    if not isinstance(level, str) or level not in READ_LEVELS:
         raise _invalid(f"read_level must be one of {sorted(READ_LEVELS)}")
     return Profile(bot_user=user, bot_uid=uid, account=account, read_level=level, sha256=sha256)
+
+
+def _root_only_file(st: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(st.st_mode)
+        and st.st_uid == ANCHOR_OWNER_UID
+        and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
 
 
 def load_profile() -> Profile:
@@ -141,17 +149,17 @@ def load_profile() -> Profile:
         st = os.lstat(path)
     except FileNotFoundError:
         raise ProfileRefused("profile_missing", "the anchor holds no profile") from None
-    if (
-        not stat.S_ISREG(st.st_mode)
-        or st.st_uid != ANCHOR_OWNER_UID
-        or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    ):
+    if not _root_only_file(st):
         raise ProfileRefused("profile_insecure", "the profile is not a root-only regular file")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except PermissionError:
         raise ProfileRefused("profile_unreadable", "the profile cannot be read") from None
     try:
+        # the same check on the opened descriptor: what is hashed and parsed is the file
+        # that was checked, with no window between lstat and open (James, #89)
+        if not _root_only_file(os.fstat(fd)):
+            raise ProfileRefused("profile_insecure", "the profile changed while it was opened")
         data = os.read(fd, MAX_PROFILE_BYTES + 1)
     finally:
         os.close(fd)

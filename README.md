@@ -333,14 +333,16 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 {"schema_version": 1, "bot_user": "<the bot's user name>", "account": "<account alias in the bot user's config>", "read_level": "lean"}
 ```
 
+**Scope.** These limits hold for the bot *session*: a model that has no shell and reaches mail only through this tool. They do not contain the bot's macOS *user* with a shell, which can run its own Python and read its own keychain. That user is kept out by the root-owned launcher, and the bot's app password is the kill switch.
+
 **What holds today, and where:**
 
 | # | Guarantee | Code | Test (`tests/test_bot_profile.py`) |
 |---|---|---|---|
 | 1 | The CLI refuses every member of the bot group, before click parses anything: unknown commands, `--help` and `--version` included. Exit 6, `profile_refused`, JSON | `cli.py` `_ProfileGuardedGroup.main`, `profile.cli_gate` | `test_the_bot_is_refused_before_click_parses` |
 | 2 | Identity is group membership, whatever state the profile is in | `profile._bot_group`, `profile._is_member` | `test_a_bot_group_member_is_refused_even_without_any_profile`, `test_the_real_group_lookup_recognises_a_member_by_process_gid` |
-| 3 | A profile counts only if parent, directory and file are root-only and the file is a regular file | `profile.load_profile` | the `*_insecure` tests |
-| 4 | The schema is strict: unknown keys, unknown users, `root` and any read level other than `lean` are refused | `profile._parse` | `test_an_invalid_profile_is_refused` |
+| 3 | A profile counts only if parent, directory and file are root-only and the file is a regular file, checked again on the opened descriptor | `profile.load_profile`, `profile._root_only_file` | the `*_insecure` tests, `test_the_opened_file_is_checked_again` |
+| 4 | The schema is strict: unknown keys, unknown users, `root` and any read level other than the string `lean` are refused | `profile._parse` | `test_an_invalid_profile_is_refused` |
 | 5 | The MCP host's entry has no unrestricted mode: it returns the profile only to the bot user it names | `profile.host_profile` | `test_the_host_refuses_every_other_state` |
 | 6 | An anchor without the group is an incomplete install: everyone is refused | `profile.cli_gate` | `test_an_anchor_without_the_bot_group_refuses_everyone` |
 | 7 | A refusal is audited in the caller's home from the user database; `HOME` and `MAILBOX_CLEANUP_AUDIT_LOG` cannot move it; no argument is recorded; the refusal does not depend on the write | `audit.log_refusal`, `cli._refuse_for_profile` | `test_the_refusal_record_ignores_home_and_the_audit_override`, `test_the_refusal_does_not_depend_on_the_audit_write` |

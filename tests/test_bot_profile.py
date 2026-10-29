@@ -6,6 +6,7 @@ import json
 import os
 import pwd
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -104,6 +105,8 @@ def test_an_anchor_without_the_file_is_missing(anchor):
         json.dumps(_valid(account="")),
         json.dumps(_valid(account="bot\r\nx")),
         json.dumps(_valid(read_level="full")),
+        json.dumps(_valid(read_level=[])),
+        json.dumps(_valid(read_level={})),
         json.dumps(_valid(account="b" * (profile.MAX_PROFILE_BYTES + 1))),
     ],
     ids=[
@@ -119,6 +122,8 @@ def test_an_anchor_without_the_file_is_missing(anchor):
         "empty-account",
         "control-char-account",
         "full-read",
+        "list-read-level",
+        "object-read-level",
         "oversize",
     ],
 )
@@ -139,6 +144,22 @@ def test_a_symlinked_profile_file_is_insecure(anchor, tmp_path):
     anchor.dir.mkdir()
     os.chmod(anchor.dir, 0o755)
     (anchor.dir / profile.PROFILE_NAME).symlink_to(real)
+    assert _rule(profile.load_profile) == "profile_insecure"
+
+
+def test_the_opened_file_is_checked_again(anchor, monkeypatch):
+    """lstat and open are two steps. If the file changes between them, what is hashed
+    and parsed is not the file that was checked; fstat on the opened descriptor closes
+    that window (James, #89 finding 2). The change is simulated inside os.open."""
+    f = anchor.write()
+    real_open = os.open
+
+    def open_after_a_swap(path, flags, *a, **kw):
+        if Path(path) == f:
+            os.chmod(f, 0o666)
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(profile.os, "open", open_after_a_swap)
     assert _rule(profile.load_profile) == "profile_insecure"
 
 
@@ -193,9 +214,14 @@ def test_a_non_member_runs_next_to_a_valid_profile_for_another_user(anchor, grou
     profile.cli_gate(os.getuid())  # no raise
 
 
-def test_a_broken_profile_does_not_lock_out_a_non_member(anchor, group):
+@pytest.mark.parametrize(
+    "raw", ["not json", json.dumps(_valid(read_level=[]))], ids=["not-json", "list-read-level"]
+)
+def test_a_broken_profile_does_not_lock_out_a_non_member(anchor, group, raw):
+    """An unhashable read_level raised TypeError, which the gate turned into gate_error
+    for everyone, the owner included (CodeRabbit and James, #89 finding 1)."""
     group(members=(OTHER,))
-    anchor.write(raw="not json")
+    anchor.write(raw=raw)
     profile.cli_gate(os.getuid())  # no raise: the group, not the file, says who the bot is
 
 
