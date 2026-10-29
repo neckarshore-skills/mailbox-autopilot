@@ -9,6 +9,11 @@ Three modes:
 Private patterns come from the `LEAK_GUARD_PRIVATE_LIST` env var (CI secret) and from
 `.leakguard-local.txt` (local, git-ignored), one regex per line. Hits from them are
 reported by position only, never with the pattern or the text.
+
+The local list itself must never be committed: a tracked `.leakguard-local.txt` (tree
+mode) or one a diff adds or renames into place (diff mode) is a hit by its path alone,
+with or without a private list in the context. A pattern's own source text copied into
+any other file is a hit too, because a regex rarely matches its own source.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOCAL_DENY_LIST = ".leakguard-local.txt"
+LOCAL_LIST_TRACKED = "local deny list is tracked; it must never be committed"
 
 # RFC 2606 reserved names plus localhost; subdomains of these are allowed too
 ALLOWED_EMAIL_DOMAINS = (
@@ -50,6 +56,10 @@ PHONE_RE = re.compile(
 )
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_GIT_RE = re.compile(r"^diff --git (.+) (.+)$")
+# A quoted new side, read from the right: inside git's quoting a `"` is always escaped,
+# so the only unescaped quote before the closing one is the opening one. This holds for
+# a path with a space and for a rename from an unquoted name (James, #87 finding 1).
+_DIFF_GIT_QUOTED_NEW_RE = re.compile(r'^diff --git (.+) ("(?:[^"\\]|\\.)*")$')
 _BINARY_DIFFER_RE = re.compile(r"^Binary files (.+) and (.+) differ$")
 # git's C-style path quoting (core.quotepath): \" \\ \a \b \f \n \r \t \v, else \ooo (octal byte)
 _C_ESCAPES = {
@@ -209,6 +219,10 @@ def added_lines(diff_text: str) -> list[tuple[str, int, str]]:
         if line.startswith("+++ ") and after_minus:
             after_minus = False
             target = line[4:]
+            # git ends the header with a tab when the path holds a space; a tab inside
+            # a name is always quoted as \t, so a raw trailing tab is never the name
+            if target.endswith("\t"):
+                target = target[:-1]
             if target == "/dev/null":
                 path = None
                 continue
@@ -234,6 +248,12 @@ def added_lines(diff_text: str) -> list[tuple[str, int, str]]:
     return out
 
 
+def _diff_git_new_side(line: str) -> str | None:
+    """The new-side token of a `diff --git` line, unquoted, or None for another line."""
+    m = _DIFF_GIT_QUOTED_NEW_RE.match(line) or _DIFF_GIT_RE.match(line)
+    return _unquote_git_path(m.group(2)) if m else None
+
+
 def binary_hit_paths(diff_text: str) -> list[str]:
     """New-side paths of every undiffed binary entry (`Binary files ... differ` or
     `GIT binary patch`) in `diff_text`. A pure deletion (new side `/dev/null`) is
@@ -242,9 +262,8 @@ def binary_hit_paths(diff_text: str) -> list[str]:
     paths: list[str] = []
     current: str | None = None
     for line in _diff_lines(diff_text):
-        m = _DIFF_GIT_RE.match(line)
-        if m:
-            b = _unquote_git_path(m.group(2))
+        b = _diff_git_new_side(line)
+        if b is not None:
             current = b[2:] if b.startswith("b/") else None
             continue
         m = _BINARY_DIFFER_RE.match(line)
@@ -257,6 +276,26 @@ def binary_hit_paths(diff_text: str) -> list[str]:
         if line.startswith("GIT binary patch") and current is not None:
             paths.append(current)
     return paths
+
+
+def diff_new_paths(diff_text: str) -> list[str]:
+    """New-side path of every `diff --git` entry, including an empty new file, which
+    has no hunk and no `+++` header. A quoted path is exact, spaces included. With
+    unquoted paths that contain spaces the split is ambiguous; the basename after the
+    last space is still exact."""
+    paths: list[str] = []
+    for line in _diff_lines(diff_text):
+        b = _diff_git_new_side(line)
+        if b is not None:
+            paths.append(b[2:] if b.startswith("b/") else b)
+    return paths
+
+
+def local_list_hits(paths) -> list[Hit]:
+    """One hit per path that is the local deny list, by name, in any folder."""
+    return [
+        Hit(p, 0, "public", LOCAL_LIST_TRACKED) for p in paths if Path(p).name == LOCAL_DENY_LIST
+    ]
 
 
 def path_allowed(path: str, allow: list[AllowEntry]) -> bool:
@@ -286,7 +325,10 @@ def _email_allowed(domain: str) -> bool:
 
 
 def scan_lines(entries, private_patterns, allow) -> list[Hit]:
-    private = [re.compile(p, re.IGNORECASE) for p in private_patterns if p.strip()]
+    sources = [p for p in private_patterns if p.strip()]
+    private = [re.compile(p, re.IGNORECASE) for p in sources]
+    # the source-copy layer ignores case like the regex layer (James, #87 finding 2)
+    folded_sources = [s.casefold() for s in sources]
     hits: list[Hit] = []
     for path, n, line in entries:
         if _allowed(path, line, allow):
@@ -303,6 +345,8 @@ def scan_lines(entries, private_patterns, allow) -> list[Hit]:
             hits.append(Hit(path, n, "public", "phone"))
         if any(rx.search(line) for rx in private):
             hits.append(Hit(path, n, "private", "private-list hit"))
+        elif any(src in line.casefold() for src in folded_sources):
+            hits.append(Hit(path, n, "private", "private-list source"))
     return hits
 
 
@@ -320,7 +364,8 @@ def scan_files(paths, private_patterns, allow) -> list[Hit]:
 def report(hits: list[Hit]) -> None:
     for h in hits:
         if h.kind == "private":
-            print(f"{h.path}:{h.line}: private-list hit")  # never the pattern or the text
+            # a fixed label, never the pattern or the text
+            print(f"{h.path}:{h.line}: {h.label}")
         else:
             print(f"{h.path}:{h.line}: {h.label}")
 
@@ -334,12 +379,12 @@ def _parse_private_list(raw: str) -> list[str]:
 
 
 def _tracked_files() -> list[str]:
-    """Every file git tracks in the current directory's repository, minus the local deny
-    list (its entries would hit themselves if it were ever force-added)."""
+    """Every file git tracks in the current directory's repository. The local deny list
+    is not skipped: if it is tracked, that is the finding (`local_list_hits`)."""
     out = subprocess.run(
         ["git", "ls-files", "-z"], check=True, capture_output=True, text=True
     ).stdout
-    return [f for f in out.split("\0") if f and Path(f).name != LOCAL_DENY_LIST]
+    return [f for f in out.split("\0") if f]
 
 
 def main(argv: list[str]) -> int:
@@ -372,11 +417,11 @@ def main(argv: list[str]) -> int:
             for p in blocked:
                 print(f"leak-guard: undiffed binary change blocked (not allowlisted): {p}")
             return 1
-        hits = scan_lines(entries, private, allow)
+        hits = local_list_hits(diff_new_paths(diff_text)) + scan_lines(entries, private, allow)
         scope = f"{len(entries)} added line(s)"
     elif argv == ["--tree"]:
         files = _tracked_files()
-        hits = scan_files(files, private, allow)
+        hits = local_list_hits(files) + scan_files(files, private, allow)
         scope = f"{len(files)} file(s)"
     elif any(a.startswith("--") for a in argv):
         print(f"leak-guard: unknown option {argv[0]!r}; use --diff FILE, --tree or file paths")
