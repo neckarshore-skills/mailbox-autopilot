@@ -25,7 +25,8 @@ WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 UV = "0.13.5"
 # uv 0.13.5 writes lock revision 5. uv 0.12.13 writes revision 3 on a fresh lock, and
 # `uv lock --check` and `uv sync --locked` under 0.13.5 accept that lock (measured
-# 2026-10-29), so this file is the only place that sees it.
+# 2026-10-29), so this test is the only place that sees an older uv's lock; a newer uv
+# that writes the same revision is seen nowhere.
 LOCK_REVISION = 5
 # The dependencies of the pinned hatchling, measured with
 # `echo hatchling==1.33.0 | uv pip compile - --python-version 3.11` (2026-10-29).
@@ -114,7 +115,7 @@ def test_the_build_backends_dependencies_are_pinned_as_build_constraints():
 
 
 def test_the_lock_records_the_build_constraints():
-    """`uv lock --check` in CI compares this record with pyproject.toml."""
+    """`uv sync --locked` in CI compares this record with pyproject.toml."""
     recorded = {
         (_normalise(c["name"]), c["specifier"])
         for c in LOCK.get("manifest", {}).get("build-constraints", [])
@@ -123,7 +124,11 @@ def test_the_lock_records_the_build_constraints():
     assert recorded == declared
 
 
-def test_the_lock_was_written_by_the_pinned_uv():
+def test_the_lock_has_the_revision_the_pinned_uv_writes():
+    """uv.lock does not record which uv wrote it. This catches a lock written by an older
+    uv (0.12.13 writes revision 3 on a fresh lock, on --upgrade and on --upgrade-package).
+    A uv that writes revision 5, such as 0.13.6, passes. Content integrity comes from the
+    sha256 hashes under --frozen and from review of the lock diff, not from this test."""
     assert (LOCK["version"], LOCK["revision"]) == (1, LOCK_REVISION)
 
 
