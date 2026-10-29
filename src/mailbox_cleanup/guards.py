@@ -363,7 +363,7 @@ class Plan:
 
 
 def _checked_plan(plan: Plan) -> Plan:
-    uids = check_uids(list(plan.uids))
+    uids = check_uids(plan.uids)  # list() would turn the str "12" into UIDs 1 and 2
     bad = (
         plan.action not in PLAN_ACTIONS
         or type(plan.uidvalidity) is not int
@@ -461,18 +461,29 @@ def _checked_caps(caps) -> dict[str, int]:
 
 
 def _trusted_dir(resolved: Path) -> bool:
-    """Every directory from `resolved` up to `/` is owned by root or the caller and is not
-    writable by group or others, so nobody else can swap the path below it."""
+    """Every directory from `resolved` up to `/` is owned by root or the caller, and group
+    and others either cannot write it or it is sticky, so nobody else can swap the path
+    below it. In a sticky directory (as /tmp, 1777) only an entry's owner, the
+    directory's owner and root can rename or delete the entry; the entry is then checked
+    like every other directory on the way."""
     me = os.getuid()
     for d in (resolved, *resolved.parents):
         st = os.lstat(d)
+        shared = st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
         if (
             not stat.S_ISDIR(st.st_mode)
             or st.st_uid not in (0, me)
-            or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or (shared and not st.st_mode & stat.S_ISVTX)
         ):
             return False
     return True
+
+
+def _is_append_only(st) -> bool:
+    """The system append-only flag (`chflags sappend`), which only root can set or clear.
+    The user flag does not count, because the owner can clear it. Without st_flags
+    (Linux) there is no such flag, so the store refuses."""
+    return bool(getattr(st, "st_flags", 0) & stat.SF_APPEND)
 
 
 class CapLedger:
@@ -480,18 +491,27 @@ class CapLedger:
 
     `reserve` is called before the side effect and records it; a failed side effect
     stays counted, which errs on the safe side. A request above what remains is refused
-    whole, never cut down. A daily cap of 0 refuses before the store is touched. With a
-    cap above 0, a store that is missing, unreadable, not the caller's own, hard-linked,
-    writable by others, or below any directory that is not root's or the caller's, or
-    that group or others can write, refuses. `reserve` never creates
-    the store, so deleting it does not start a new day: the launcher provisions it once
-    (`provision`). Where the store lives is the host's and launcher's decision (3c);
-    section 5.5 accepts a same-uid store only once 5b is proven.
+    whole, never cut down. A daily cap of 0 refuses before the store is touched.
+
+    With a cap above 0 the store must be the caller's own regular file with one link,
+    that group and others cannot write, and that carries the system append-only flag, so
+    the bot can add counts but cannot truncate or delete the store (#76 D15). Every
+    directory above it must be root's or the caller's, and group and others cannot write
+    it unless it is sticky. Anything else refuses, each with its own rule. `reserve`
+    never creates the store, so deleting it does not start a new day: the launcher
+    provisions it once (`provision`) and root sets `chflags sappend`. Where the store
+    lives is the host's and launcher's decision (3c); section 5.5 accepts a same-uid
+    store only once 5b is proven.
     """
 
     @staticmethod
     def provision(store: Path) -> None:
-        """Create an empty owner-only store. Refuses (FileExistsError) if anything is there."""
+        """Create an empty owner-only store. Refuses (FileExistsError) if anything is there.
+
+        The store belongs to whoever runs this, and `reserve` accepts only a store the
+        bot owns. So it runs as the bot uid, or the launcher, which runs as root (L3),
+        chowns the file to the bot before root sets `chflags sappend`.
+        """
         fd = os.open(store, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             os.fchmod(fd, 0o600)
@@ -535,12 +555,14 @@ class CapLedger:
         except OSError:
             raise _refuse("cap_store_unreadable", "the cap store's directory is missing") from None
         if not _trusted_dir(parent):
-            raise _refuse("cap_store_insecure", "a directory above the cap store is not trusted")
+            raise _refuse(
+                "cap_store_dir_untrusted", "a directory above the cap store is not trusted"
+            )
         try:
             fd = os.open(parent / self._store.name, flags)
         except OSError as e:
             if e.errno == errno.ELOOP:
-                raise _refuse("cap_store_insecure", "the cap store is a symlink") from None
+                raise _refuse("cap_store_symlink", "the cap store is a symlink") from None
             raise _refuse("cap_store_unreadable", "the cap store cannot be opened") from None
         st = os.fstat(fd)
         if (
@@ -550,7 +572,12 @@ class CapLedger:
             or st.st_nlink != 1
         ):
             os.close(fd)
-            raise _refuse("cap_store_insecure", "the cap store is not an owner-only file")
+            raise _refuse("cap_store_file_untrusted", "the cap store is not an owner-only file")
+        if not _is_append_only(st):  # checked on the opened descriptor, after the rest
+            os.close(fd)
+            raise _refuse(
+                "cap_store_not_append_only", "the cap store lacks the system append-only flag"
+            )
         return fd
 
     @staticmethod

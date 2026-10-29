@@ -7,6 +7,7 @@ directly, with no model and no host in the loop.
 import json as _json
 import os
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -447,6 +448,7 @@ def test_an_unknown_well_formed_token_is_refused():
     [
         ({"uids": ("1:*",)}, "uid_format"),
         ({"uids": ()}, "uid_empty"),
+        ({"uids": "12"}, "uid_set"),  # a str is not UIDs 1 and 2 (James on #91, finding 4)
         ({"action": "delete"}, "plan_invalid"),
         ({"uidvalidity": 0}, "plan_invalid"),
         ({"uidvalidity": True}, "plan_invalid"),
@@ -486,6 +488,21 @@ def test_a_flag_plan_goes_through_the_flag_allowlist():
 
 
 # --- (d) caps: per run and rolling 24 hours ------------------------------------------
+
+_REAL_IS_APPEND_ONLY = getattr(g, "_is_append_only", None)
+
+
+@pytest.fixture(autouse=True)
+def _store_counts_as_append_only(monkeypatch):
+    """Only root can set the system append-only flag, and Linux has no st_flags, so the
+    cap tests stand in for it. The flag check itself runs for real in the tests that
+    take `real_append_check`, and in test_only_the_system_append_only_flag_counts."""
+    monkeypatch.setattr(g, "_is_append_only", lambda st: True, raising=False)
+
+
+@pytest.fixture
+def real_append_check(monkeypatch):
+    monkeypatch.setattr(g, "_is_append_only", _REAL_IS_APPEND_ONLY, raising=False)
 
 
 def _caps(
@@ -604,7 +621,7 @@ def test_a_symlinked_store_is_refused(tmp_path):
     real.write_text("")
     os.chmod(real, 0o600)
     (tmp_path / "caps.jsonl").symlink_to(real)
-    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_insecure"
+    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_symlink"
 
 
 @pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
@@ -612,7 +629,7 @@ def test_a_store_others_can_write_is_refused(tmp_path, mode):
     store = tmp_path / "caps.jsonl"
     store.write_text("")
     os.chmod(store, mode)
-    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_insecure"
+    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_file_untrusted"
 
 
 @pytest.mark.parametrize(
@@ -734,19 +751,86 @@ def test_provision_refuses_an_existing_store(tmp_path):
 def test_a_hard_linked_store_is_refused(tmp_path):
     _caps(tmp_path)
     os.link(tmp_path / "caps.jsonl", tmp_path / "other.jsonl")
-    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_insecure"
+    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_file_untrusted"
 
 
-def test_a_store_in_a_directory_others_can_write_is_refused(tmp_path):
+@pytest.mark.parametrize("mode", [0o777, 0o775, 0o757])
+def test_a_store_in_a_directory_others_can_write_is_refused(tmp_path, mode):
+    """Without the sticky bit, group or other write lets them rename the store away."""
     d = tmp_path / "shared"
     d.mkdir()
     g.CapLedger.provision(d / "caps.jsonl")
-    os.chmod(d, 0o777)
+    os.chmod(d, mode)
     try:
         caps = _caps(tmp_path, store=d / "caps.jsonl")
-        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_dir_untrusted"
     finally:
         os.chmod(d, 0o755)
+
+
+@pytest.mark.parametrize("mode", [0o1777, 0o1770])
+def test_a_sticky_directory_others_can_write_is_trusted(tmp_path, mode):
+    """In a sticky directory only an entry's owner, the directory's owner and root can
+    rename or delete the entry, so a shared /tmp (1777) cannot swap the path below it.
+    The entries below are still checked. CI on Linux keeps tmp_path below /tmp (James on
+    #91, finding 1)."""
+    d = tmp_path / "shared"
+    d.mkdir()
+    g.CapLedger.provision(d / "caps.jsonl")
+    os.chmod(d, mode)
+    try:
+        _caps(tmp_path, store=d / "caps.jsonl").reserve("move", 1)
+    finally:
+        os.chmod(d, 0o755)
+
+
+def test_a_sticky_directory_owned_by_someone_else_is_not_trusted(tmp_path, monkeypatch):
+    """The sticky bit protects entries from others; it does not make the directory's
+    owner trusted. Creating another user's directory needs root, so lstat reports one."""
+    d = (tmp_path / "shared").resolve()
+    d.mkdir()
+    real_lstat = os.lstat
+    for uid, trusted in ((os.getuid(), True), (0, True), (os.getuid() + 1, False)):
+
+        def lstat(p, uid=uid):
+            if Path(p) == d:
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o1777, st_uid=uid)
+            return real_lstat(p)
+
+        monkeypatch.setattr(g.os, "lstat", lstat)
+        assert g._trusted_dir(d) is trusted
+        monkeypatch.setattr(g.os, "lstat", real_lstat)
+
+
+def test_only_the_system_append_only_flag_counts():
+    """The owner can clear the user flag (UF_APPEND); only root can clear SF_APPEND. A
+    platform without st_flags has neither and refuses."""
+    is_append_only = _REAL_IS_APPEND_ONLY
+    assert is_append_only(SimpleNamespace(st_flags=stat.SF_APPEND))
+    assert is_append_only(SimpleNamespace(st_flags=stat.SF_APPEND | stat.UF_APPEND))
+    assert not is_append_only(SimpleNamespace(st_flags=stat.UF_APPEND))
+    assert not is_append_only(SimpleNamespace(st_flags=0))
+    assert not is_append_only(SimpleNamespace())  # Linux: no st_flags at all
+
+
+def test_a_store_without_the_system_append_only_flag_is_refused(tmp_path, real_append_check):
+    """D15: the bot owns the store, so without sappend one O_TRUNC resets the 24-hour
+    count. The library refuses instead of trusting the launcher (James on #91, finding 2)."""
+    caps = _caps(tmp_path)
+    e = _refusal(caps.reserve, "move", 1)
+    assert (e.error_code, e.rule) == ("profile_refused", "cap_store_not_append_only")
+    assert (tmp_path / "caps.jsonl").read_text() == ""
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="no file flags on this platform")
+def test_the_user_append_only_flag_is_not_enough(tmp_path, real_append_check):
+    caps = _caps(tmp_path)
+    store = tmp_path / "caps.jsonl"
+    os.chflags(store, stat.UF_APPEND)
+    try:
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_not_append_only"
+    finally:
+        os.chflags(store, 0)
 
 
 # --- (c) keep list at the last step ---------------------------------------------------
@@ -799,7 +883,7 @@ def test_a_store_below_an_ancestor_others_can_write_is_refused(tmp_path):
     os.chmod(top, 0o777)
     try:
         caps = _caps(tmp_path, store=top / "inner" / "caps.jsonl")
-        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_dir_untrusted"
     finally:
         os.chmod(top, 0o755)
 
@@ -813,7 +897,7 @@ def test_a_store_reached_through_a_symlinked_directory_is_checked_where_it_resol
     os.chmod(real, 0o777)
     try:
         caps = _caps(tmp_path, store=tmp_path / "link" / "caps.jsonl")
-        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_dir_untrusted"
     finally:
         os.chmod(real, 0o755)
 
