@@ -8,14 +8,19 @@ error code, an exit code and a rule name, and never a folder name, address or UI
 What holds here holds in the library. It is enforced for the bot once the host uses it.
 """
 
+import errno
+import fcntl
 import hashlib
 import json
+import os
 import re
 import secrets
+import stat
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 EXIT_CODES = {
     "preview_mismatch": 4,  # existing code: the apply does not match the preview
@@ -406,3 +411,106 @@ def check_uids_present(plan: Plan, present: Iterable[str]) -> None:
     """Every previewed UID must still be in the source; otherwise nothing is applied."""
     if set(plan.uids) - {str(u) for u in present}:
         raise _mismatch("uids_gone", "a previewed message is no longer in the source")
+
+
+# --- (d) caps ------------------------------------------------------------------------
+
+ACTION_CLASSES = ("create_folder", "draft", "flag", "move")
+# per run: move 50 and flag 10 from the earlier design; folder creation and drafts are
+# the builder's choice (#76 section 3d). Per rolling 24 hours: 0 for every write (D7).
+FIRST_ROLLOUT_PER_RUN = {"create_folder": 5, "draft": 5, "flag": 10, "move": 50}
+FIRST_ROLLOUT_PER_DAY = {c: 0 for c in ACTION_CLASSES}
+DAY_SECONDS = 24 * 60 * 60
+
+
+def _cap_hit(action: str, rule: str, message: str) -> GuardRefused:
+    return GuardRefused("cap_reached", rule, message, action=action)
+
+
+def _checked_caps(caps) -> dict[str, int]:
+    if (
+        not isinstance(caps, Mapping)
+        or set(caps) != set(ACTION_CLASSES)
+        or any(type(v) is not int or v < 0 for v in caps.values())
+    ):
+        raise _refuse("caps_invalid", "caps must name every action class with a count >= 0")
+    return dict(caps)
+
+
+class CapLedger:
+    """Per-run and rolling 24-hour caps per action class (#76 section 3d).
+
+    `reserve` is called before the side effect and records it; a failed side effect
+    stays counted, which errs on the safe side. A request above what remains is refused
+    whole, never cut down. A daily cap of 0 refuses before the store is touched. With a
+    cap above 0, a store that is missing, unreadable, not the caller's own or writable by
+    others refuses. Where the store lives is the host's and launcher's decision (3c);
+    section 5.5 accepts a same-uid store only once 5b is proven.
+    """
+
+    def __init__(self, *, per_run, per_day, store: Path, run_id: str, clock=time.time):
+        self._per_run = _checked_caps(per_run)
+        self._per_day = _checked_caps(per_day)
+        self._store = Path(store)
+        self._run_id = str(run_id)
+        self._clock = clock
+        self._used = {c: 0 for c in ACTION_CLASSES}
+
+    def reserve(self, action, count) -> None:
+        if action not in ACTION_CLASSES:
+            raise _refuse("action_unknown", "no such action class")
+        if type(count) is not int or count < 1:
+            raise _refuse("cap_count", "the count must be a positive integer", action=action)
+        if self._used[action] + count > self._per_run[action]:
+            raise _cap_hit(action, f"{action}_per_run", "the per-run cap is reached")
+        day_cap = self._per_day[action]
+        if count > day_cap:  # covers a cap of 0 without opening the store
+            raise _cap_hit(action, f"{action}_per_day", "the 24-hour cap is reached")
+        fd = self._open_store()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            now = self._clock()
+            if self._used_today(fd, action, now) + count > day_cap:
+                raise _cap_hit(action, f"{action}_per_day", "the 24-hour cap is reached")
+            record = {"ts": now, "action": action, "count": count, "run": self._run_id}
+            os.write(fd, (json.dumps(record, sort_keys=True) + "\n").encode())
+        finally:
+            os.close(fd)
+        self._used[action] += count
+
+    def _open_store(self) -> int:
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+        try:
+            fd = os.open(self._store, flags, 0o600)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise _refuse("cap_store_insecure", "the cap store is a symlink") from None
+            raise _refuse("cap_store_unreadable", "the cap store cannot be opened") from None
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.getuid()
+            or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            os.close(fd)
+            raise _refuse("cap_store_insecure", "the cap store is not an owner-only file")
+        return fd
+
+    @staticmethod
+    def _used_today(fd: int, action: str, now: float) -> int:
+        os.lseek(fd, 0, os.SEEK_SET)
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+        total = 0
+        try:
+            for line in b"".join(chunks).decode("utf-8").splitlines():
+                r = json.loads(line)
+                ts, cls, n = r["ts"], r["action"], r["count"]
+                if type(ts) not in (int, float) or type(n) is not int or cls not in ACTION_CLASSES:
+                    raise ValueError("bad record")
+                if cls == action and ts > now - DAY_SECONDS:  # a future entry counts too
+                    total += n
+        except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+            raise _refuse("cap_store_unreadable", "the cap store is corrupt") from None
+        return total

@@ -4,6 +4,9 @@ The library is pure: no click, no config read, no profile read. These tests call
 directly, with no model and no host in the loop.
 """
 
+import json as _json
+import os
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -480,3 +483,148 @@ def test_a_uid_that_left_the_source_refuses_the_whole_apply():
 def test_a_flag_plan_goes_through_the_flag_allowlist():
     plan = _plan(action="flag", target=None, flags_add=("\\Deleted",))
     assert _refusal(g.PreviewLedger().issue, plan).rule == "flag_forbidden"
+
+
+# --- (d) caps: per run and rolling 24 hours ------------------------------------------
+
+
+def _caps(tmp_path, *, per_run=None, per_day=None, clock=None, run_id="run-1", store=None):
+    return g.CapLedger(
+        per_run=per_run or dict(g.FIRST_ROLLOUT_PER_RUN),
+        per_day=per_day or {c: 5 for c in g.ACTION_CLASSES},
+        store=store or tmp_path / "caps.jsonl",
+        run_id=run_id,
+        clock=clock or _Clock(),
+    )
+
+
+def test_the_first_rollout_caps_are_the_decided_ones():
+    assert g.FIRST_ROLLOUT_PER_RUN == {"create_folder": 5, "draft": 5, "flag": 10, "move": 50}
+    assert g.FIRST_ROLLOUT_PER_DAY == {"create_folder": 0, "draft": 0, "flag": 0, "move": 0}
+
+
+@pytest.mark.parametrize("action", ["create_folder", "draft", "flag", "move"])
+def test_a_daily_cap_of_zero_refuses_without_touching_the_store(tmp_path, action):
+    store = tmp_path / "missing-dir" / "caps.jsonl"
+    caps = _caps(tmp_path, per_day=dict(g.FIRST_ROLLOUT_PER_DAY), store=store)
+    e = _refusal(caps.reserve, action, 1)
+    assert (e.error_code, e.exit_code, e.rule) == ("cap_reached", 7, f"{action}_per_day")
+    assert e.audit_fields() == {
+        "error_code": "cap_reached",
+        "rule": f"{action}_per_day",
+        "action": action,
+    }
+    assert not store.parent.exists()
+
+
+def test_the_per_run_cap_counts_within_the_run(tmp_path):
+    caps = _caps(tmp_path, per_day={c: 1000 for c in g.ACTION_CLASSES})
+    caps.reserve("move", 50)
+    e = _refusal(caps.reserve, "move", 1)
+    assert (e.error_code, e.rule, e.action) == ("cap_reached", "move_per_run", "move")
+    caps.reserve("flag", 10)  # each action class is counted separately
+    assert _refusal(caps.reserve, "flag", 1).rule == "flag_per_run"
+
+
+def test_the_daily_cap_counts_across_runs(tmp_path):
+    clock = _Clock()
+    _caps(tmp_path, clock=clock, run_id="run-1").reserve("move", 3)
+    clock.t += 3600
+    second = _caps(tmp_path, clock=clock, run_id="run-2")
+    assert _refusal(second.reserve, "move", 3).rule == "move_per_day"
+    second.reserve("move", 2)
+    assert _refusal(second.reserve, "move", 1).rule == "move_per_day"
+
+
+def test_a_request_above_what_remains_is_refused_whole_and_not_recorded(tmp_path):
+    caps = _caps(tmp_path)
+    caps.reserve("move", 3)
+    before = (tmp_path / "caps.jsonl").read_text()
+    assert _refusal(caps.reserve, "move", 3).rule == "move_per_day"
+    assert (tmp_path / "caps.jsonl").read_text() == before
+
+
+def test_entries_older_than_24_hours_no_longer_count(tmp_path):
+    clock = _Clock()
+    _caps(tmp_path, clock=clock).reserve("move", 5)
+    clock.t += g.DAY_SECONDS + 1
+    _caps(tmp_path, clock=clock, run_id="run-2").reserve("move", 5)
+
+
+def test_an_entry_from_the_future_still_counts(tmp_path):
+    """A clock set back must not reopen the day."""
+    clock = _Clock()
+    _caps(tmp_path, clock=clock).reserve("move", 5)
+    clock.t -= 3 * g.DAY_SECONDS
+    assert _refusal(_caps(tmp_path, clock=clock).reserve, "move", 1).rule == "move_per_day"
+
+
+def test_the_store_is_created_owner_only_and_records_no_values(tmp_path):
+    os.umask(0o022)
+    _caps(tmp_path, run_id="run-7").reserve("move", 2)
+    store = tmp_path / "caps.jsonl"
+    assert stat.S_IMODE(store.stat().st_mode) == 0o600
+    record = _json.loads(store.read_text().splitlines()[0])
+    assert set(record) == {"ts", "action", "count", "run"}
+    assert (record["action"], record["count"], record["run"]) == ("move", 2, "run-7")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json\n",
+        '{"ts": 1}\n',
+        '{"ts": "x", "action": "move", "count": 1, "run": "r"}\n',
+        "[1]\n",
+    ],
+)
+def test_an_unreadable_store_refuses_when_the_cap_is_above_zero(tmp_path, content):
+    store = tmp_path / "caps.jsonl"
+    store.write_text(content)
+    os.chmod(store, 0o600)
+    e = _refusal(_caps(tmp_path).reserve, "move", 1)
+    assert (e.error_code, e.rule) == ("profile_refused", "cap_store_unreadable")
+
+
+def test_a_store_in_a_missing_directory_refuses_when_the_cap_is_above_zero(tmp_path):
+    caps = _caps(tmp_path, store=tmp_path / "missing" / "caps.jsonl")
+    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_unreadable"
+
+
+def test_a_symlinked_store_is_refused(tmp_path):
+    real = tmp_path / "real.jsonl"
+    real.write_text("")
+    os.chmod(real, 0o600)
+    (tmp_path / "caps.jsonl").symlink_to(real)
+    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_insecure"
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
+def test_a_store_others_can_write_is_refused(tmp_path, mode):
+    store = tmp_path / "caps.jsonl"
+    store.write_text("")
+    os.chmod(store, mode)
+    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_insecure"
+
+
+@pytest.mark.parametrize(
+    "per_run",
+    [
+        {"move": 50, "flag": 10, "create_folder": 5},  # a class is missing
+        {"move": 50, "flag": 10, "create_folder": 5, "draft": 5, "delete": 1},
+        {"move": -1, "flag": 10, "create_folder": 5, "draft": 5},
+        {"move": True, "flag": 10, "create_folder": 5, "draft": 5},
+        {"move": "50", "flag": 10, "create_folder": 5, "draft": 5},
+    ],
+)
+def test_invalid_caps_refuse_everything(tmp_path, per_run):
+    with pytest.raises(g.GuardRefused) as e:
+        _caps(tmp_path, per_run=per_run)
+    assert e.value.rule == "caps_invalid"
+
+
+@pytest.mark.parametrize(
+    "action, count", [("delete", 1), ("move", 0), ("move", -1), ("move", True)]
+)
+def test_an_unknown_action_or_a_bad_count_is_refused(tmp_path, action, count):
+    assert _refusal(_caps(tmp_path).reserve, action, count).rule in ("action_unknown", "cap_count")
