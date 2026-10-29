@@ -105,6 +105,31 @@ def test_quoted_non_ascii_path_is_unquoted_and_scanned():
     assert lg.added_lines(diff) == [("täst.md", 1, "hello")]
 
 
+@pytest.mark.parametrize(
+    "header, expected",
+    [
+        ('"a/my d\\303\\244/f.md" "b/my d\\303\\244/f.md"', "my dä/f.md"),
+        ("a/my file.md b/my file.md", "my file.md"),
+    ],
+    ids=["quoted-with-space", "unquoted-with-space"],
+)
+def test_a_path_with_a_space_ends_its_header_with_a_tab(header, expected):
+    """git ends a ---/+++ header with a tab when the path contains a space. Read as
+    part of the path, the tab made the guard refuse every such file as an unrecognized
+    target (measured with a real `git diff` while fixing #87)."""
+    a, b = (s + "\t" for s in _split_header(header))
+    diff = f"diff --git {header}\n--- {a}\n+++ {b}\n@@ -0,0 +1 @@\n+hello\n"
+    assert lg.added_lines(diff) == [(expected, 1, "hello")]
+
+
+def _split_header(header):
+    if header.startswith('"'):
+        a, _, b = header[1:].partition('" "')
+        return f'"{a}"', f'"{b}'
+    half = len(header) // 2
+    return header[:half], header[half + 1 :]
+
+
 def test_unrecognized_diff_target_fails_closed():
     diff = "diff --git a/x.md b/x.md\n--- a/x.md\n+++ garbage\n@@ -0,0 +1 @@\n+hello\n"
     with pytest.raises(lg.LeakGuardError):
@@ -145,6 +170,29 @@ def test_binary_hit_paths_ignores_pure_deletions():
         "Binary files a/note.md and /dev/null differ\n"
     )
     assert lg.binary_hit_paths(diff) == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        '"a/my d\\303\\244/img.png" "b/my d\\303\\244/img.png"',
+        'a/old.png "b/my d\\303\\244/img.png"',
+    ],
+    ids=["quoted-with-space", "rename-onto-quoted-with-space"],
+)
+def test_binary_hit_paths_unquotes_a_quoted_path_with_a_space(header):
+    """git quotes a path only for a non-ASCII or control byte; with a space as well,
+    the greedy header split kept the closing quote and the path was wrong (James, #87)."""
+    diff = f"diff --git {header}\nindex 3b18e51..2c95405 100644\nGIT binary patch\nliteral 12\n"
+    assert lg.binary_hit_paths(diff) == ["my dä/img.png"]
+
+
+def test_diff_new_paths_unquotes_a_quoted_path_with_a_space():
+    diff = (
+        'diff --git "a/my d\\303\\244/f.md" "b/my d\\303\\244/f.md"\n'
+        "new file mode 100644\nindex 0000000..e69de29\n"
+    )
+    assert lg.diff_new_paths(diff) == ["my dä/f.md"]
 
 
 def test_binary_hit_paths_extracts_path_for_git_binary_patch_block():
@@ -438,8 +486,26 @@ def _diff_adding(path_line: str, extra: str = "") -> str:
             '"a/d\\303\\244/.leakguard-local.txt" "b/d\\303\\244/.leakguard-local.txt"',
             "new file mode 100644\nindex 0000000..e69de29\n",
         ),
+        # git's quoted path form with a space: the greedy split kept the closing quote
+        _diff_adding(
+            '"a/my d\\303\\244/.leakguard-local.txt" "b/my d\\303\\244/.leakguard-local.txt"',
+            "new file mode 100644\nindex 0000000..e69de29\n",
+        ),
+        # a rename from a plain name onto a quoted path with a space
+        _diff_adding(
+            'a/notes.txt "b/my d\\303\\244/.leakguard-local.txt"',
+            "similarity index 100%\nrename from notes.txt\n"
+            'rename to "my d\\303\\244/.leakguard-local.txt"\n',
+        ),
     ],
-    ids=["new-with-content", "new-empty-in-subfolder", "rename-onto-name", "quoted-path"],
+    ids=[
+        "new-with-content",
+        "new-empty-in-subfolder",
+        "rename-onto-name",
+        "quoted-path",
+        "quoted-path-with-space",
+        "rename-onto-quoted-path-with-space",
+    ],
 )
 def test_a_diff_that_adds_the_local_deny_list_fails(tmp_path, monkeypatch, capsys, entry):
     diff = tmp_path / "pr.diff"
@@ -470,6 +536,13 @@ def test_a_copy_of_a_private_pattern_under_another_name_hits():
     """A pattern's own source text rarely matches the pattern (`a\\.b` does not match
     the text `a\\.b`), so a copy of the list under another name passed the regex scan."""
     hits = _scan("private-host\\.example\n", private=["private-host\\.example"], path="copy.txt")
+    assert [(h.kind, h.label) for h in hits] == [("private", "private-list source")]
+
+
+def test_a_copy_of_a_private_pattern_in_another_case_hits():
+    """The regex layer ignores case; the source-copy layer has to as well, or a copy
+    of the list in upper case passes it (James, #87 finding 2)."""
+    hits = _scan("PRIVATE-HOST\\.EXAMPLE\n", private=["private-host\\.example"], path="copy.txt")
     assert [(h.kind, h.label) for h in hits] == [("private", "private-list source")]
 
 

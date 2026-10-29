@@ -56,6 +56,10 @@ PHONE_RE = re.compile(
 )
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_GIT_RE = re.compile(r"^diff --git (.+) (.+)$")
+# A quoted new side, read from the right: inside git's quoting a `"` is always escaped,
+# so the only unescaped quote before the closing one is the opening one. This holds for
+# a path with a space and for a rename from an unquoted name (James, #87 finding 1).
+_DIFF_GIT_QUOTED_NEW_RE = re.compile(r'^diff --git (.+) ("(?:[^"\\]|\\.)*")$')
 _BINARY_DIFFER_RE = re.compile(r"^Binary files (.+) and (.+) differ$")
 # git's C-style path quoting (core.quotepath): \" \\ \a \b \f \n \r \t \v, else \ooo (octal byte)
 _C_ESCAPES = {
@@ -215,6 +219,10 @@ def added_lines(diff_text: str) -> list[tuple[str, int, str]]:
         if line.startswith("+++ ") and after_minus:
             after_minus = False
             target = line[4:]
+            # git ends the header with a tab when the path holds a space; a tab inside
+            # a name is always quoted as \t, so a raw trailing tab is never the name
+            if target.endswith("\t"):
+                target = target[:-1]
             if target == "/dev/null":
                 path = None
                 continue
@@ -240,6 +248,12 @@ def added_lines(diff_text: str) -> list[tuple[str, int, str]]:
     return out
 
 
+def _diff_git_new_side(line: str) -> str | None:
+    """The new-side token of a `diff --git` line, unquoted, or None for another line."""
+    m = _DIFF_GIT_QUOTED_NEW_RE.match(line) or _DIFF_GIT_RE.match(line)
+    return _unquote_git_path(m.group(2)) if m else None
+
+
 def binary_hit_paths(diff_text: str) -> list[str]:
     """New-side paths of every undiffed binary entry (`Binary files ... differ` or
     `GIT binary patch`) in `diff_text`. A pure deletion (new side `/dev/null`) is
@@ -248,9 +262,8 @@ def binary_hit_paths(diff_text: str) -> list[str]:
     paths: list[str] = []
     current: str | None = None
     for line in _diff_lines(diff_text):
-        m = _DIFF_GIT_RE.match(line)
-        if m:
-            b = _unquote_git_path(m.group(2))
+        b = _diff_git_new_side(line)
+        if b is not None:
             current = b[2:] if b.startswith("b/") else None
             continue
         m = _BINARY_DIFFER_RE.match(line)
@@ -267,13 +280,13 @@ def binary_hit_paths(diff_text: str) -> list[str]:
 
 def diff_new_paths(diff_text: str) -> list[str]:
     """New-side path of every `diff --git` entry, including an empty new file, which
-    has no hunk and no `+++` header. With unquoted paths that contain spaces the
-    split is ambiguous; the basename after the last space is still exact."""
+    has no hunk and no `+++` header. A quoted path is exact, spaces included. With
+    unquoted paths that contain spaces the split is ambiguous; the basename after the
+    last space is still exact."""
     paths: list[str] = []
     for line in _diff_lines(diff_text):
-        m = _DIFF_GIT_RE.match(line)
-        if m:
-            b = _unquote_git_path(m.group(2))
+        b = _diff_git_new_side(line)
+        if b is not None:
             paths.append(b[2:] if b.startswith("b/") else b)
     return paths
 
@@ -314,6 +327,8 @@ def _email_allowed(domain: str) -> bool:
 def scan_lines(entries, private_patterns, allow) -> list[Hit]:
     sources = [p for p in private_patterns if p.strip()]
     private = [re.compile(p, re.IGNORECASE) for p in sources]
+    # the source-copy layer ignores case like the regex layer (James, #87 finding 2)
+    folded_sources = [s.casefold() for s in sources]
     hits: list[Hit] = []
     for path, n, line in entries:
         if _allowed(path, line, allow):
@@ -330,7 +345,7 @@ def scan_lines(entries, private_patterns, allow) -> list[Hit]:
             hits.append(Hit(path, n, "public", "phone"))
         if any(rx.search(line) for rx in private):
             hits.append(Hit(path, n, "private", "private-list hit"))
-        elif any(src in line for src in sources):
+        elif any(src in line.casefold() for src in folded_sources):
             hits.append(Hit(path, n, "private", "private-list source"))
     return hits
 
