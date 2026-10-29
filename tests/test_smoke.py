@@ -1,4 +1,4 @@
 def test_import():
     import mailbox_cleanup
 
-    assert mailbox_cleanup.__version__ == "0.8.1"
+    assert mailbox_cleanup.__version__ == "0.9.0"
