@@ -473,6 +473,18 @@ def test_a_copy_of_a_private_pattern_under_another_name_hits():
     assert [(h.kind, h.label) for h in hits] == [("private", "private-list source")]
 
 
+def test_an_allowlist_entry_exempts_a_private_source_hit():
+    """The allowlist names approved content as a regex, so its own line can carry a
+    private pattern's source text (`.leak-guard-allow` line 6, #74). Only an explicit
+    entry with a reason exempts it, line by line, as for every other hit."""
+    allow = lg.parse_allow(".leak-guard-allow:^README\\.md: # approved by the owner\n")
+    line = "README.md:^Jane `jane@private-host\\.example`$ # approved\n"
+    assert _scan(line, private=["private-host\\.example"], path=".leak-guard-allow") != []
+    assert (
+        _scan(line, private=["private-host\\.example"], allow=allow, path=".leak-guard-allow") == []
+    )
+
+
 def test_a_pattern_that_matches_itself_is_reported_once():
     hits = _scan("private-host\n", private=["private-host"])
     assert [(h.kind, h.label) for h in hits] == [("private", "private-list hit")]
