@@ -328,3 +328,155 @@ def test_the_host_sees_only_inbox_the_namespace_and_owner_targets():
         "INBOX",
         "Projects",
     )
+
+
+# --- (d) preview token ---------------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _plan(**over):
+    doc = dict(
+        action="move",
+        account="bot",
+        source="INBOX",
+        uidvalidity=42,
+        uids=("3", "7"),
+        target="Bot/Newsletter",
+    )
+    doc.update(over)
+    return g.Plan(**doc)
+
+
+def test_a_token_returns_exactly_the_previewed_plan():
+    ledger = g.PreviewLedger()
+    token = ledger.issue(_plan(uids=("7", "3", "7")))
+    plan = ledger.redeem(token, action="move", account="bot")
+    assert (plan.source, plan.target, plan.uids, plan.uidvalidity) == (
+        "INBOX",
+        "Bot/Newsletter",
+        ("3", "7"),
+        42,
+    )
+
+
+def test_the_apply_takes_no_uids_and_no_target():
+    import inspect
+
+    params = set(inspect.signature(g.PreviewLedger.redeem).parameters)
+    assert params == {"self", "token", "action", "account"}
+
+
+def test_the_same_count_with_a_different_uid_set_cannot_be_applied():
+    """#76: --expect-count matches a number only, so a preview of 2 and an apply of 2
+    different messages passed. A token names its own UIDs and nothing else."""
+    ledger = g.PreviewLedger()
+    token_a = ledger.issue(_plan(uids=("3", "7")))
+    ledger.issue(_plan(uids=("4", "8")))
+    assert ledger.redeem(token_a, action="move", account="bot").uids == ("3", "7")
+
+
+def test_a_token_is_random_even_for_the_same_plan():
+    ledger = g.PreviewLedger()
+    a, b = ledger.issue(_plan()), ledger.issue(_plan())
+    assert a != b and len(a) == 64 and int(a, 16) >= 0
+
+
+def test_a_token_is_single_use():
+    ledger = g.PreviewLedger()
+    token = ledger.issue(_plan())
+    ledger.redeem(token, action="move", account="bot")
+    e = _refusal(ledger.redeem, token, action="move", account="bot")
+    assert (e.error_code, e.exit_code, e.rule) == ("preview_mismatch", 4, "token_unknown")
+
+
+def test_a_token_expires_and_is_spent_by_the_refusal():
+    clock = _Clock()
+    ledger = g.PreviewLedger(lifetime=300, clock=clock)
+    token = ledger.issue(_plan())
+    clock.t += 301
+    assert _refusal(ledger.redeem, token, action="move", account="bot").rule == "token_expired"
+    clock.t -= 301
+    assert _refusal(ledger.redeem, token, action="move", account="bot").rule == "token_unknown"
+
+
+def test_a_token_within_its_lifetime_is_accepted():
+    clock = _Clock()
+    ledger = g.PreviewLedger(lifetime=300, clock=clock)
+    token = ledger.issue(_plan())
+    clock.t += 300
+    ledger.redeem(token, action="move", account="bot")
+
+
+@pytest.mark.parametrize(
+    "kw, rule",
+    [
+        ({"action": "flag", "account": "bot"}, "token_action"),
+        ({"action": "move", "account": "other"}, "token_account"),
+    ],
+)
+def test_a_token_for_another_action_or_account_is_refused_and_spent(kw, rule):
+    ledger = g.PreviewLedger()
+    token = ledger.issue(_plan())
+    assert _refusal(ledger.redeem, token, **kw).rule == rule
+    assert _refusal(ledger.redeem, token, action="move", account="bot").rule == "token_unknown"
+
+
+@pytest.mark.parametrize("token", ["", "1:*", "A" * 64, "g" * 64, "0" * 63, 123, None])
+def test_a_malformed_token_is_refused(token):
+    e = _refusal(g.PreviewLedger().redeem, token, action="move", account="bot")
+    assert (e.error_code, e.rule) == ("preview_mismatch", "token_invalid")
+
+
+def test_an_unknown_well_formed_token_is_refused():
+    e = _refusal(g.PreviewLedger().redeem, "0" * 64, action="move", account="bot")
+    assert e.rule == "token_unknown"
+
+
+@pytest.mark.parametrize(
+    "over, rule",
+    [
+        ({"uids": ("1:*",)}, "uid_format"),
+        ({"uids": ()}, "uid_empty"),
+        ({"action": "delete"}, "plan_invalid"),
+        ({"uidvalidity": 0}, "plan_invalid"),
+        ({"uidvalidity": True}, "plan_invalid"),
+        ({"uidvalidity": "42"}, "plan_invalid"),
+        ({"target": None}, "plan_invalid"),  # a move needs a target
+    ],
+)
+def test_an_invalid_plan_gets_no_token(over, rule):
+    assert _refusal(g.PreviewLedger().issue, _plan(**over)).rule == rule
+
+
+def test_a_flag_plan_needs_flags_and_no_target():
+    ledger = g.PreviewLedger()
+    token = ledger.issue(_plan(action="flag", target=None, flags_add=("\\Seen",)))
+    assert ledger.redeem(token, action="flag", account="bot").flags_add == ("\\Seen",)
+    assert _refusal(ledger.issue, _plan(action="flag", target=None)).rule == "plan_invalid"
+    assert (
+        _refusal(ledger.issue, _plan(action="flag", flags_add=("\\Seen",))).rule == "plan_invalid"
+    )
+
+
+def test_a_changed_uidvalidity_refuses_the_apply():
+    """With a new UIDVALIDITY the same numbers name different messages."""
+    g.check_uidvalidity(_plan(), 42)
+    assert _refusal(g.check_uidvalidity, _plan(), 43).rule == "uidvalidity_changed"
+
+
+def test_a_uid_that_left_the_source_refuses_the_whole_apply():
+    g.check_uids_present(_plan(), ["3", "7", "9"])
+    e = _refusal(g.check_uids_present, _plan(), ["3"])
+    assert (e.error_code, e.rule) == ("preview_mismatch", "uids_gone")
+
+
+def test_a_flag_plan_goes_through_the_flag_allowlist():
+    plan = _plan(action="flag", target=None, flags_add=("\\Deleted",))
+    assert _refusal(g.PreviewLedger().issue, plan).rule == "flag_forbidden"

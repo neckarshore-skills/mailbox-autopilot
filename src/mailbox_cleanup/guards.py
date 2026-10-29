@@ -8,7 +8,11 @@ error code, an exit code and a rule name, and never a folder name, address or UI
 What holds here holds in the library. It is enforced for the bot once the host uses it.
 """
 
+import hashlib
+import json
 import re
+import secrets
+import time
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -307,3 +311,98 @@ class FolderView:
                 or f.name in self.owner_targets
             )
         )
+
+
+# --- (d) preview token ---------------------------------------------------------------
+
+TOKEN_LIFETIME_SECONDS = 300  # preview and apply happen in one run of the bot
+_TOKEN_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+PLAN_ACTIONS = ("flag", "move")
+
+
+def _mismatch(rule: str, message: str) -> GuardRefused:
+    return GuardRefused("preview_mismatch", rule, message)
+
+
+@dataclass(frozen=True)
+class Plan:
+    """What a preview showed. The apply gets everything from here, nothing from the caller."""
+
+    action: str
+    account: str
+    source: str
+    uidvalidity: int
+    uids: tuple[str, ...]
+    target: str | None = None
+    flags_add: tuple[str, ...] = ()
+    flags_remove: tuple[str, ...] = ()
+
+
+def _checked_plan(plan: Plan) -> Plan:
+    uids = check_uids(list(plan.uids))
+    bad = (
+        plan.action not in PLAN_ACTIONS
+        or type(plan.uidvalidity) is not int
+        or plan.uidvalidity < 1
+        or type(plan.account) is not str
+        or type(plan.source) is not str
+        or (plan.action == "move" and (type(plan.target) is not str or plan.flags_add))
+        or (plan.action == "move" and plan.flags_remove)
+        or (plan.action == "flag" and (plan.target is not None))
+        or (plan.action == "flag" and not (plan.flags_add or plan.flags_remove))
+    )
+    if bad:
+        raise _refuse("plan_invalid", "the preview does not describe one move or one flag change")
+    flags_add, flags_remove = plan.flags_add, plan.flags_remove
+    if plan.action == "flag":
+        flags_add, flags_remove = check_flags(add=list(flags_add), remove=list(flags_remove))
+    return Plan(
+        **{**plan.__dict__, "uids": uids, "flags_add": flags_add, "flags_remove": flags_remove}
+    )
+
+
+class PreviewLedger:
+    """Preview tokens for one host process. A token is a hash over a random nonce and the
+    plan; the ledger keeps the plan, so the apply needs nothing but the token. Single use:
+    a token is spent by its first redeem, whether that succeeds or not."""
+
+    def __init__(self, *, lifetime: float = TOKEN_LIFETIME_SECONDS, clock=time.monotonic):
+        self._lifetime = lifetime
+        self._clock = clock
+        self._plans: dict[str, tuple[Plan, float]] = {}
+
+    def issue(self, plan: Plan) -> str:
+        plan = _checked_plan(plan)
+        now = self._clock()
+        self._plans = {t: e for t, e in self._plans.items() if e[1] >= now}
+        canonical = json.dumps(plan.__dict__, sort_keys=True, separators=(",", ":"))
+        token = hashlib.sha256(secrets.token_bytes(16) + canonical.encode()).hexdigest()
+        self._plans[token] = (plan, now + self._lifetime)
+        return token
+
+    def redeem(self, token, *, action: str, account: str) -> Plan:
+        if type(token) is not str or not _TOKEN_RE.fullmatch(token):
+            raise _mismatch("token_invalid", "the preview token is malformed")
+        entry = self._plans.pop(token, None)
+        if entry is None:
+            raise _mismatch("token_unknown", "no preview issued this token, or it was used")
+        plan, expires = entry
+        if self._clock() > expires:
+            raise _mismatch("token_expired", "the preview token has expired")
+        if plan.action != action:
+            raise _mismatch("token_action", "the preview was for another action")
+        if plan.account != account:
+            raise _mismatch("token_account", "the preview was for another account")
+        return plan
+
+
+def check_uidvalidity(plan: Plan, current: int) -> None:
+    """A new UIDVALIDITY means the same numbers name different messages."""
+    if current != plan.uidvalidity:
+        raise _mismatch("uidvalidity_changed", "the source folder's UIDVALIDITY changed")
+
+
+def check_uids_present(plan: Plan, present: Iterable[str]) -> None:
+    """Every previewed UID must still be in the source; otherwise nothing is applied."""
+    if set(plan.uids) - {str(u) for u in present}:
+        raise _mismatch("uids_gone", "a previewed message is no longer in the source")
