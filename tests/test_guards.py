@@ -816,3 +816,12 @@ def test_a_store_reached_through_a_symlinked_directory_is_checked_where_it_resol
         assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
     finally:
         os.chmod(real, 0o755)
+
+
+def test_a_directory_owned_by_someone_else_is_not_trusted(tmp_path, monkeypatch):
+    """Creating a directory of another user needs root, so the caller's uid is faked:
+    the caller's own tmp directories then belong to "someone else"."""
+    assert g._trusted_dir(tmp_path.resolve())
+    real = os.getuid()
+    monkeypatch.setattr(g.os, "getuid", lambda: real + 1)
+    assert not g._trusted_dir(tmp_path.resolve())
