@@ -26,11 +26,25 @@ mailbox-autopilot = "mailbox_cleanup.cli:cli"
 mailbox-cleanup = "mailbox_cleanup.cli:cli"
 
 [build-system]
-requires = ["hatchling"]
+# exact, with its dependencies under [tool.uv]: uv builds this project outside the lock
+# on every machine that runs bin/mailbox-autopilot (release condition 3, James on #90)
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mailbox_cleanup"]
+
+[tool.uv]
+# hatchling 1.33.0's dependencies, measured with `uv pip compile` (2026-10-29). No
+# required-version here: plugin users run their own uv; CI pins it in the workflow and
+# the launcher binds the bot host (#76).
+build-constraint-dependencies = [
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.7.0",
+    "tomlkit==0.15.2",
+    "trove-classifiers==2026.9.21.13",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
