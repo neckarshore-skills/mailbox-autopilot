@@ -8,6 +8,7 @@ from imap_tools import AND
 
 from ..folders import resolve_folder
 from .batching import move_in_batches
+from .delete import check_expected
 from .filters import parse_age
 
 
@@ -26,7 +27,10 @@ def run_archive(
     older_than: str,
     apply: bool = False,
     now: datetime | None = None,
+    expect_count: int | None = None,
 ) -> ArchiveResult:
+    """With apply, `expect_count` binds the action to the confirmed preview (#55): if the
+    set changed size since then, nothing is created and nothing moves."""
     if now is None:
         now = datetime.now(UTC)
     cutoff = (now - parse_age(older_than)).date()
@@ -47,6 +51,12 @@ def run_archive(
         target = f"{archive_root}/{year}"
         uids = by_year[year]
         groups.append({"year": year, "target": target, "uids": uids, "count": len(uids)})
+
+    if apply:
+        # before the first folder is created: a refused apply leaves the mailbox as it was
+        check_expected(expect_count, sum(g["count"] for g in groups))
+    for g in groups:
+        target, uids = g["target"], g["uids"]
         if apply and uids:
             try:
                 if not mb.folder.exists(target):
