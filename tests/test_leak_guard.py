@@ -105,6 +105,31 @@ def test_quoted_non_ascii_path_is_unquoted_and_scanned():
     assert lg.added_lines(diff) == [("täst.md", 1, "hello")]
 
 
+@pytest.mark.parametrize(
+    "header, expected",
+    [
+        ('"a/my d\\303\\244/f.md" "b/my d\\303\\244/f.md"', "my dä/f.md"),
+        ("a/my file.md b/my file.md", "my file.md"),
+    ],
+    ids=["quoted-with-space", "unquoted-with-space"],
+)
+def test_a_path_with_a_space_ends_its_header_with_a_tab(header, expected):
+    """git ends a ---/+++ header with a tab when the path contains a space. Read as
+    part of the path, the tab made the guard refuse every such file as an unrecognized
+    target (measured with a real `git diff` while fixing #87)."""
+    a, b = (s + "\t" for s in _split_header(header))
+    diff = f"diff --git {header}\n--- {a}\n+++ {b}\n@@ -0,0 +1 @@\n+hello\n"
+    assert lg.added_lines(diff) == [(expected, 1, "hello")]
+
+
+def _split_header(header):
+    if header.startswith('"'):
+        a, _, b = header[1:].partition('" "')
+        return f'"{a}"', f'"{b}'
+    half = len(header) // 2
+    return header[:half], header[half + 1 :]
+
+
 def test_unrecognized_diff_target_fails_closed():
     diff = "diff --git a/x.md b/x.md\n--- a/x.md\n+++ garbage\n@@ -0,0 +1 @@\n+hello\n"
     with pytest.raises(lg.LeakGuardError):
@@ -145,6 +170,29 @@ def test_binary_hit_paths_ignores_pure_deletions():
         "Binary files a/note.md and /dev/null differ\n"
     )
     assert lg.binary_hit_paths(diff) == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        '"a/my d\\303\\244/img.png" "b/my d\\303\\244/img.png"',
+        'a/old.png "b/my d\\303\\244/img.png"',
+    ],
+    ids=["quoted-with-space", "rename-onto-quoted-with-space"],
+)
+def test_binary_hit_paths_unquotes_a_quoted_path_with_a_space(header):
+    """git quotes a path only for a non-ASCII or control byte; with a space as well,
+    the greedy header split kept the closing quote and the path was wrong (James, #87)."""
+    diff = f"diff --git {header}\nindex 3b18e51..2c95405 100644\nGIT binary patch\nliteral 12\n"
+    assert lg.binary_hit_paths(diff) == ["my dä/img.png"]
+
+
+def test_diff_new_paths_unquotes_a_quoted_path_with_a_space():
+    diff = (
+        'diff --git "a/my d\\303\\244/f.md" "b/my d\\303\\244/f.md"\n'
+        "new file mode 100644\nindex 0000000..e69de29\n"
+    )
+    assert lg.diff_new_paths(diff) == ["my dä/f.md"]
 
 
 def test_binary_hit_paths_extracts_path_for_git_binary_patch_block():
@@ -395,13 +443,130 @@ def test_the_local_deny_list_is_read_and_never_printed(tmp_path, monkeypatch, ca
     assert "public patterns only" not in out
 
 
-def test_the_local_deny_list_is_not_scanned_itself(tmp_path, monkeypatch, capsys):
-    """Even if someone force-adds it, the list must not flag its own entries."""
-    _git_tree(tmp_path, {".leakguard-local.txt": "private-host\n"})
+@pytest.mark.parametrize("where", [".leakguard-local.txt", "sub/.leakguard-local.txt"])
+def test_a_tracked_local_deny_list_fails_the_tree(tmp_path, monkeypatch, capsys, where):
+    """The list must never be committed. Until 2026-10-29 the tree scan skipped it by
+    name, so a force-added list went public through a green guard (#84, 6c578c6).
+    The refusal is by path, so it holds without any private list in this context."""
+    _git_tree(tmp_path, {where: "private-host\n", "ok.py": "x = 1\n"})
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
-    assert lg.main(["--tree"]) == 0
-    assert "0 file(s) scanned" in capsys.readouterr().out
+    rc = lg.main(["--tree"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert f"{where}:0: {lg.LOCAL_LIST_TRACKED}" in out
+    assert "private-host" not in out  # the list's content is never printed
+
+
+def _diff_adding(path_line: str, extra: str = "") -> str:
+    return f"diff --git {path_line}\n{extra}"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # a new file with content
+        _diff_adding(
+            "a/.leakguard-local.txt b/.leakguard-local.txt",
+            "new file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
+            "+++ b/.leakguard-local.txt\n@@ -0,0 +1 @@\n+private-host\n",
+        ),
+        # an empty new file: no hunk, no +++ header, only the diff --git line
+        _diff_adding(
+            "a/sub/.leakguard-local.txt b/sub/.leakguard-local.txt",
+            "new file mode 100644\nindex 0000000..e69de29\n",
+        ),
+        # a rename onto the list's name
+        _diff_adding(
+            "a/notes.txt b/.leakguard-local.txt",
+            "similarity index 100%\nrename from notes.txt\nrename to .leakguard-local.txt\n",
+        ),
+        # git's quoted path form
+        _diff_adding(
+            '"a/d\\303\\244/.leakguard-local.txt" "b/d\\303\\244/.leakguard-local.txt"',
+            "new file mode 100644\nindex 0000000..e69de29\n",
+        ),
+        # git's quoted path form with a space: the greedy split kept the closing quote
+        _diff_adding(
+            '"a/my d\\303\\244/.leakguard-local.txt" "b/my d\\303\\244/.leakguard-local.txt"',
+            "new file mode 100644\nindex 0000000..e69de29\n",
+        ),
+        # a rename from a plain name onto a quoted path with a space
+        _diff_adding(
+            'a/notes.txt "b/my d\\303\\244/.leakguard-local.txt"',
+            "similarity index 100%\nrename from notes.txt\n"
+            'rename to "my d\\303\\244/.leakguard-local.txt"\n',
+        ),
+    ],
+    ids=[
+        "new-with-content",
+        "new-empty-in-subfolder",
+        "rename-onto-name",
+        "quoted-path",
+        "quoted-path-with-space",
+        "rename-onto-quoted-path-with-space",
+    ],
+)
+def test_a_diff_that_adds_the_local_deny_list_fails(tmp_path, monkeypatch, capsys, entry):
+    diff = tmp_path / "pr.diff"
+    diff.write_text(entry, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    rc = lg.main(["--diff", str(diff)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert lg.LOCAL_LIST_TRACKED in out
+    assert "private-host" not in out
+
+
+def test_a_diff_that_only_names_the_list_in_text_passes(tmp_path, monkeypatch, capsys):
+    """The refusal is about the file, not about the word: docs may name the list."""
+    diff = tmp_path / "pr.diff"
+    diff.write_text(
+        "diff --git a/README.md b/README.md\nindex 1111111..2222222 100644\n"
+        "--- a/README.md\n+++ b/README.md\n@@ -1,0 +2 @@\n+Keep .leakguard-local.txt local.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--diff", str(diff)]) == 0
+
+
+def test_a_copy_of_a_private_pattern_under_another_name_hits():
+    """A pattern's own source text rarely matches the pattern (`a\\.b` does not match
+    the text `a\\.b`), so a copy of the list under another name passed the regex scan."""
+    hits = _scan("private-host\\.example\n", private=["private-host\\.example"], path="copy.txt")
+    assert [(h.kind, h.label) for h in hits] == [("private", "private-list source")]
+
+
+def test_a_copy_of_a_private_pattern_in_another_case_hits():
+    """The regex layer ignores case; the source-copy layer has to as well, or a copy
+    of the list in upper case passes it (James, #87 finding 2)."""
+    hits = _scan("PRIVATE-HOST\\.EXAMPLE\n", private=["private-host\\.example"], path="copy.txt")
+    assert [(h.kind, h.label) for h in hits] == [("private", "private-list source")]
+
+
+def test_an_allowlist_entry_exempts_a_private_source_hit():
+    """The allowlist names approved content as a regex, so its own line can carry a
+    private pattern's source text (`.leak-guard-allow` line 6, #74). Only an explicit
+    entry with a reason exempts it, line by line, as for every other hit."""
+    allow = lg.parse_allow(".leak-guard-allow:^README\\.md: # approved by the owner\n")
+    line = "README.md:^Jane `jane@private-host\\.example`$ # approved\n"
+    assert _scan(line, private=["private-host\\.example"], path=".leak-guard-allow") != []
+    assert (
+        _scan(line, private=["private-host\\.example"], allow=allow, path=".leak-guard-allow") == []
+    )
+
+
+def test_a_pattern_that_matches_itself_is_reported_once():
+    hits = _scan("private-host\n", private=["private-host"])
+    assert [(h.kind, h.label) for h in hits] == [("private", "private-list hit")]
+
+
+def test_a_private_source_hit_never_reveals_the_pattern(capsys):
+    lg.report([lg.Hit("copy.txt", 3, "private", "private-list source")])
+    out = capsys.readouterr().out
+    assert out == "copy.txt:3: private-list source\n"
 
 
 def test_the_local_deny_list_is_git_ignored():
