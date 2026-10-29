@@ -20,13 +20,15 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          # the uv that wrote uv.lock; without it setup-uv installs the latest
+          version: "0.13.5"
           enable-cache: true
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Lint
         run: uv run ruff check .
@@ -73,13 +75,15 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          # the uv that wrote uv.lock; without it setup-uv installs the latest
+          version: "0.13.5"
           enable-cache: true
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # Enumerate the two disjoint suites for their counts. --collect-only never starts Docker
       # (fixtures are lazy). `|| true` keeps a collection hiccup from masking the count line; the
