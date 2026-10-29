@@ -24,6 +24,19 @@ def _isolated_audit_log(tmp_path, monkeypatch):
     monkeypatch.setattr(audit, "DEFAULT_AUDIT_LOG", tmp_path / "home" / "audit.log")
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_bot_profile(tmp_path, monkeypatch):
+    """No test reads the machine's real profile anchor or bot group (#76): on a Mac where
+    the bot is installed, the suite would otherwise run under that profile. A refusal
+    record would go to the caller's real home, so that is redirected too. Tests that need
+    an anchor or a group set them up themselves (tests/test_bot_profile.py)."""
+    from mailbox_cleanup import profile
+
+    monkeypatch.setattr(profile, "ANCHOR_DIR", tmp_path / "no-anchor" / "mailbox-autopilot")
+    monkeypatch.setattr(profile, "BOT_GROUP", "mailbox-autopilot-bot-absent-in-tests")
+    monkeypatch.setattr(profile, "_home_of", lambda uid: tmp_path / "pwd-home")
+
+
 def _imap_ready(host: str, port: int, timeout: float = 2.0) -> bool:
     """Greenmail opens the TCP port before the IMAP listener is fully up.
     Verify by reading the IMAP greeting line."""
