@@ -576,6 +576,10 @@ class CapLedger:
 # --- (c) keep list at the last step --------------------------------------------------
 
 
+# one bare addr-spec: one @, a non-empty local part and domain, no space, no <>,;"()[]\
+_BARE_ADDRESS_RE = re.compile(r'[^@\s<>,;"()\[\]\\]+@[^@\s<>,;"()\[\]\\]+')
+
+
 def ensure_none_kept(uids: Iterable[str], senders: Mapping, keep: Iterable[str]) -> None:
     """Refuse if any UID's sender is on the keep list, or cannot be read.
 
@@ -583,6 +587,10 @@ def ensure_none_kept(uids: Iterable[str], senders: Mapping, keep: Iterable[str])
     MOVE or STORE, so a path that skips the selection layer cannot get around the keep
     list. A keep-list hit is not authentication: From can be spoofed. The refusal names
     no address.
+
+    Contract: `senders` maps each UID to one parsed, bare address (as imap_tools'
+    `from_`, which the selection layer passes). A display name, several mailboxes or
+    anything else that is not one bare address refuses, so the match cannot fail open.
     """
     try:
         addrs, domains = parse_keep(list(keep))
@@ -590,7 +598,7 @@ def ensure_none_kept(uids: Iterable[str], senders: Mapping, keep: Iterable[str])
         raise _refuse("keep_invalid", "the keep list has an invalid entry") from None
     for uid in uids:
         sender = senders.get(uid)
-        if type(sender) is not str or "@" not in sender:
+        if type(sender) is not str or not _BARE_ADDRESS_RE.fullmatch(sender):
             raise _refuse("keep_unverifiable", "a message's sender cannot be read")
         if _is_kept(sender, addrs, domains):
             raise _refuse("keep_list", "a message is from a sender on the keep list")

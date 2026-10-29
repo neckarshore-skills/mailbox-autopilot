@@ -825,3 +825,23 @@ def test_a_directory_owned_by_someone_else_is_not_trusted(tmp_path, monkeypatch)
     real = os.getuid()
     monkeypatch.setattr(g.os, "getuid", lambda: real + 1)
     assert not g._trusted_dir(tmp_path.resolve())
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        "Boss <boss@company.example>",  # a display name: the exact match missed the kept address
+        "x@a.example, alerts@bank.example",  # a From header can list several mailboxes
+        "<boss@company.example>",
+        "boss@company.example ",
+        '"a@b"@company.example',
+        "a@@company.example",
+        "@company.example",
+        "boss@",
+    ],
+)
+def test_a_sender_that_is_not_one_bare_address_is_refused(sender):
+    """The host passes parsed addresses, as the selection layer does (imap_tools from_).
+    Anything else refuses instead of failing the keep match open (advisor on #91)."""
+    e = _refusal(g.ensure_none_kept, ("3",), {"3": sender}, KEEP)
+    assert e.rule == "keep_unverifiable"
