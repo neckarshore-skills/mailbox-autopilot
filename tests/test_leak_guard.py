@@ -395,13 +395,93 @@ def test_the_local_deny_list_is_read_and_never_printed(tmp_path, monkeypatch, ca
     assert "public patterns only" not in out
 
 
-def test_the_local_deny_list_is_not_scanned_itself(tmp_path, monkeypatch, capsys):
-    """Even if someone force-adds it, the list must not flag its own entries."""
-    _git_tree(tmp_path, {".leakguard-local.txt": "private-host\n"})
+@pytest.mark.parametrize("where", [".leakguard-local.txt", "sub/.leakguard-local.txt"])
+def test_a_tracked_local_deny_list_fails_the_tree(tmp_path, monkeypatch, capsys, where):
+    """The list must never be committed. Until 2026-10-29 the tree scan skipped it by
+    name, so a force-added list went public through a green guard (#84, 6c578c6).
+    The refusal is by path, so it holds without any private list in this context."""
+    _git_tree(tmp_path, {where: "private-host\n", "ok.py": "x = 1\n"})
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
-    assert lg.main(["--tree"]) == 0
-    assert "0 file(s) scanned" in capsys.readouterr().out
+    rc = lg.main(["--tree"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert f"{where}:0: {lg.LOCAL_LIST_TRACKED}" in out
+    assert "private-host" not in out  # the list's content is never printed
+
+
+def _diff_adding(path_line: str, extra: str = "") -> str:
+    return f"diff --git {path_line}\n{extra}"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # a new file with content
+        _diff_adding(
+            "a/.leakguard-local.txt b/.leakguard-local.txt",
+            "new file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
+            "+++ b/.leakguard-local.txt\n@@ -0,0 +1 @@\n+private-host\n",
+        ),
+        # an empty new file: no hunk, no +++ header, only the diff --git line
+        _diff_adding(
+            "a/sub/.leakguard-local.txt b/sub/.leakguard-local.txt",
+            "new file mode 100644\nindex 0000000..e69de29\n",
+        ),
+        # a rename onto the list's name
+        _diff_adding(
+            "a/notes.txt b/.leakguard-local.txt",
+            "similarity index 100%\nrename from notes.txt\nrename to .leakguard-local.txt\n",
+        ),
+        # git's quoted path form
+        _diff_adding(
+            '"a/d\\303\\244/.leakguard-local.txt" "b/d\\303\\244/.leakguard-local.txt"',
+            "new file mode 100644\nindex 0000000..e69de29\n",
+        ),
+    ],
+    ids=["new-with-content", "new-empty-in-subfolder", "rename-onto-name", "quoted-path"],
+)
+def test_a_diff_that_adds_the_local_deny_list_fails(tmp_path, monkeypatch, capsys, entry):
+    diff = tmp_path / "pr.diff"
+    diff.write_text(entry, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    rc = lg.main(["--diff", str(diff)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert lg.LOCAL_LIST_TRACKED in out
+    assert "private-host" not in out
+
+
+def test_a_diff_that_only_names_the_list_in_text_passes(tmp_path, monkeypatch, capsys):
+    """The refusal is about the file, not about the word: docs may name the list."""
+    diff = tmp_path / "pr.diff"
+    diff.write_text(
+        "diff --git a/README.md b/README.md\nindex 1111111..2222222 100644\n"
+        "--- a/README.md\n+++ b/README.md\n@@ -1,0 +2 @@\n+Keep .leakguard-local.txt local.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--diff", str(diff)]) == 0
+
+
+def test_a_copy_of_a_private_pattern_under_another_name_hits():
+    """A pattern's own source text rarely matches the pattern (`a\\.b` does not match
+    the text `a\\.b`), so a copy of the list under another name passed the regex scan."""
+    hits = _scan("private-host\\.example\n", private=["private-host\\.example"], path="copy.txt")
+    assert [(h.kind, h.label) for h in hits] == [("private", "private-list source")]
+
+
+def test_a_pattern_that_matches_itself_is_reported_once():
+    hits = _scan("private-host\n", private=["private-host"])
+    assert [(h.kind, h.label) for h in hits] == [("private", "private-list hit")]
+
+
+def test_a_private_source_hit_never_reveals_the_pattern(capsys):
+    lg.report([lg.Hit("copy.txt", 3, "private", "private-list source")])
+    out = capsys.readouterr().out
+    assert out == "copy.txt:3: private-list source\n"
 
 
 def test_the_local_deny_list_is_git_ignored():
