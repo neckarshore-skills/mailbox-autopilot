@@ -7,18 +7,18 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{name = "German Rauhut", email = "german@rauhut.com"}]
 dependencies = [
-    "click>=8.1",
+    "click==8.3.3",
     "imap-tools==1.12.1",
-    "keyring>=24.0",
-    "pyyaml>=6.0.3",
-    "requests>=2.31",
+    "keyring==25.7.0",
+    "pyyaml==6.0.3",
+    "requests==2.33.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-cov>=4.1",
-    "ruff>=0.4",
+    "pytest==9.0.3",
+    "pytest-cov==7.1.0",
+    "ruff==0.15.12",
 ]
 
 [project.scripts]
