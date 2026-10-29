@@ -488,11 +488,16 @@ def test_a_flag_plan_goes_through_the_flag_allowlist():
 # --- (d) caps: per run and rolling 24 hours ------------------------------------------
 
 
-def _caps(tmp_path, *, per_run=None, per_day=None, clock=None, run_id="run-1", store=None):
+def _caps(
+    tmp_path, *, per_run=None, per_day=None, clock=None, run_id="run-1", store=None, provision=True
+):
+    store = store or tmp_path / "caps.jsonl"
+    if provision and store.parent.is_dir() and not os.path.lexists(store):
+        g.CapLedger.provision(store)
     return g.CapLedger(
         per_run=per_run or dict(g.FIRST_ROLLOUT_PER_RUN),
         per_day=per_day or {c: 5 for c in g.ACTION_CLASSES},
-        store=store or tmp_path / "caps.jsonl",
+        store=store,
         run_id=run_id,
         clock=clock or _Clock(),
     )
@@ -559,9 +564,12 @@ def test_an_entry_from_the_future_still_counts(tmp_path):
     assert _refusal(_caps(tmp_path, clock=clock).reserve, "move", 1).rule == "move_per_day"
 
 
-def test_the_store_is_created_owner_only_and_records_no_values(tmp_path):
-    os.umask(0o022)
-    _caps(tmp_path, run_id="run-7").reserve("move", 2)
+def test_the_store_is_provisioned_owner_only_and_records_no_values(tmp_path):
+    old = os.umask(0o022)
+    try:
+        _caps(tmp_path, run_id="run-7").reserve("move", 2)
+    finally:
+        os.umask(old)
     store = tmp_path / "caps.jsonl"
     assert stat.S_IMODE(store.stat().st_mode) == 0o600
     record = _json.loads(store.read_text().splitlines()[0])
@@ -701,3 +709,41 @@ def test_tokens_redeemed_from_many_threads_are_spent_once():
 def test_inbox_is_case_insensitive_but_not_a_fullwidth_form():
     assert _view().check_source("iNbOx") == "INBOX"
     assert _refusal(_view().check_source, "ＩＮＢＯＸ").rule == "folder_unknown"
+
+
+def test_reserve_never_creates_the_store(tmp_path):
+    """Deleting the store must not reset the day (security review of 3b)."""
+    caps = _caps(tmp_path, provision=False)
+    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_unreadable"
+    assert not (tmp_path / "caps.jsonl").exists()
+
+
+def test_a_deleted_store_refuses_instead_of_starting_a_new_day(tmp_path):
+    _caps(tmp_path).reserve("move", 5)
+    (tmp_path / "caps.jsonl").unlink()
+    later = _caps(tmp_path, run_id="run-2", provision=False)
+    assert _refusal(later.reserve, "move", 1).rule == "cap_store_unreadable"
+
+
+def test_provision_refuses_an_existing_store(tmp_path):
+    g.CapLedger.provision(tmp_path / "caps.jsonl")
+    with pytest.raises(FileExistsError):
+        g.CapLedger.provision(tmp_path / "caps.jsonl")
+
+
+def test_a_hard_linked_store_is_refused(tmp_path):
+    _caps(tmp_path)
+    os.link(tmp_path / "caps.jsonl", tmp_path / "other.jsonl")
+    assert _refusal(_caps(tmp_path).reserve, "move", 1).rule == "cap_store_insecure"
+
+
+def test_a_store_in_a_directory_others_can_write_is_refused(tmp_path):
+    d = tmp_path / "shared"
+    d.mkdir()
+    g.CapLedger.provision(d / "caps.jsonl")
+    os.chmod(d, 0o777)
+    try:
+        caps = _caps(tmp_path, store=d / "caps.jsonl")
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
+    finally:
+        os.chmod(d, 0o755)

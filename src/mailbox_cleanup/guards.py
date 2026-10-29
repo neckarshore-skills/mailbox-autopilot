@@ -464,10 +464,21 @@ class CapLedger:
     `reserve` is called before the side effect and records it; a failed side effect
     stays counted, which errs on the safe side. A request above what remains is refused
     whole, never cut down. A daily cap of 0 refuses before the store is touched. With a
-    cap above 0, a store that is missing, unreadable, not the caller's own or writable by
-    others refuses. Where the store lives is the host's and launcher's decision (3c);
+    cap above 0, a store that is missing, unreadable, not the caller's own, hard-linked,
+    writable by others or in a directory others can write refuses. `reserve` never creates
+    the store, so deleting it does not start a new day: the launcher provisions it once
+    (`provision`). Where the store lives is the host's and launcher's decision (3c);
     section 5.5 accepts a same-uid store only once 5b is proven.
     """
+
+    @staticmethod
+    def provision(store: Path) -> None:
+        """Create an empty owner-only store. Refuses (FileExistsError) if anything is there."""
+        fd = os.open(store, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
 
     def __init__(self, *, per_run, per_day, store: Path, run_id: str, clock=time.time):
         self._per_run = _checked_caps(per_run)
@@ -500,9 +511,10 @@ class CapLedger:
         self._used[action] += count
 
     def _open_store(self) -> int:
-        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW  # no O_CREAT: a missing store refuses
         try:
-            fd = os.open(self._store, flags, 0o600)
+            parent = os.stat(self._store.parent)
+            fd = os.open(self._store, flags)
         except OSError as e:
             if e.errno == errno.ELOOP:
                 raise _refuse("cap_store_insecure", "the cap store is a symlink") from None
@@ -512,6 +524,8 @@ class CapLedger:
             not stat.S_ISREG(st.st_mode)
             or st.st_uid != os.getuid()
             or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or st.st_nlink != 1
+            or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
         ):
             os.close(fd)
             raise _refuse("cap_store_insecure", "the cap store is not an owner-only file")
