@@ -66,10 +66,13 @@ def _rotate_if_needed(path: Path) -> None:
     os.replace(path, path.with_name(f"{path.name}.1"))
 
 
-def _append(record: Mapping[str, object]) -> None:
-    path = _audit_path()
+def _append(record: Mapping[str, object], path: Path | None = None) -> None:
+    """`path` set: the tool's own directory under a home from the user database (#76),
+    tightened like the default one. Unset: the default location or the env override."""
+    own_dir = path is not None or _is_default_location()
+    path = path if path is not None else _audit_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if _is_default_location():
+    if own_dir:
         os.chmod(path.parent, DIR_MODE)  # mkdir's mode is filtered by the umask
     _rotate_if_needed(path)
     line = json.dumps(record, ensure_ascii=False) + "\n"
@@ -161,3 +164,27 @@ def log_manage_action(
     if error is not None:
         record["error"] = error
     _append(record)
+
+
+def log_refusal(
+    *, home: Path, command: str, rule: str, caller_uid: int, profile_sha256: str | None
+) -> None:
+    """One record for a refusal by the bot profile (#76), before any argument was parsed.
+
+    Written to `<home>/.mailbox-cleanup/audit.log`, where the caller passes the home from
+    the user database: neither HOME nor MAILBOX_CLEANUP_AUDIT_LOG can move or silence it.
+    `command` is the known command path ("delete", "manage search") or "unknown"; no
+    argument and no value is recorded.
+    """
+    _append(
+        {
+            "timestamp": _now(),
+            "subcommand": command,
+            "result": "refused",
+            "error_code": "profile_refused",
+            "rule": rule,
+            "caller_uid": caller_uid,
+            "profile_sha256": profile_sha256,
+        },
+        path=home / ".mailbox-cleanup" / "audit.log",
+    )
