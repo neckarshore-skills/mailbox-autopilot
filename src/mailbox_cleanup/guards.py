@@ -23,6 +23,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from .operations.selection import _is_kept, parse_keep
+
 EXIT_CODES = {
     "preview_mismatch": 4,  # existing code: the apply does not match the preview
     "profile_refused": 6,  # the bot profile refuses the request (#89)
@@ -549,3 +551,26 @@ class CapLedger:
         except (ValueError, KeyError, TypeError, UnicodeDecodeError):
             raise _refuse("cap_store_unreadable", "the cap store is corrupt") from None
         return total
+
+
+# --- (c) keep list at the last step --------------------------------------------------
+
+
+def ensure_none_kept(uids: Iterable[str], senders: Mapping, keep: Iterable[str]) -> None:
+    """Refuse if any UID's sender is on the keep list, or cannot be read.
+
+    Called with the From addresses fetched for exactly these UIDs immediately before
+    MOVE or STORE, so a path that skips the selection layer cannot get around the keep
+    list. A keep-list hit is not authentication: From can be spoofed. The refusal names
+    no address.
+    """
+    try:
+        addrs, domains = parse_keep(list(keep))
+    except ValueError:
+        raise _refuse("keep_invalid", "the keep list has an invalid entry") from None
+    for uid in uids:
+        sender = senders.get(uid)
+        if type(sender) is not str or "@" not in sender:
+            raise _refuse("keep_unverifiable", "a message's sender cannot be read")
+        if _is_kept(sender, addrs, domains):
+            raise _refuse("keep_list", "a message is from a sender on the keep list")

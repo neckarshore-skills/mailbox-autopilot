@@ -747,3 +747,45 @@ def test_a_store_in_a_directory_others_can_write_is_refused(tmp_path):
         assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
     finally:
         os.chmod(d, 0o755)
+
+
+# --- (c) keep list at the last step ---------------------------------------------------
+
+KEEP = ["boss@company.example", "@bank.example"]
+
+
+def test_no_kept_sender_passes():
+    g.ensure_none_kept(("3", "7"), {"3": "a@news.example", "7": "b@shop.example"}, KEEP)
+
+
+@pytest.mark.parametrize(
+    "sender",
+    ["boss@company.example", "BOSS@Company.Example", "alerts@bank.example", "x@mail.bank.example"],
+)
+def test_a_kept_sender_refuses_the_whole_request_without_naming_it(sender):
+    e = _refusal(g.ensure_none_kept, ("3", "7"), {"3": "a@news.example", "7": sender}, KEEP)
+    assert (e.error_code, e.rule) == ("profile_refused", "keep_list")
+    assert "example" not in str(e) and "example" not in repr(e.audit_fields())
+
+
+@pytest.mark.parametrize(
+    "senders",
+    [
+        {"3": "a@news.example"},
+        {"3": "a@news.example", "7": None},
+        {"3": "a@news.example", "7": ""},
+        {"3": "a@news.example", "7": "undisclosed"},
+    ],
+)
+def test_a_uid_whose_sender_cannot_be_read_is_refused(senders):
+    assert _refusal(g.ensure_none_kept, ("3", "7"), senders, KEEP).rule == "keep_unverifiable"
+
+
+def test_an_empty_keep_list_still_needs_a_readable_sender():
+    assert _refusal(g.ensure_none_kept, ("3",), {"3": None}, []).rule == "keep_unverifiable"
+
+
+def test_an_invalid_keep_entry_refuses():
+    assert (
+        _refusal(g.ensure_none_kept, ("3",), {"3": "a@b.example"}, ["boss"]).rule == "keep_invalid"
+    )
