@@ -460,6 +460,21 @@ def _checked_caps(caps) -> dict[str, int]:
     return dict(caps)
 
 
+def _trusted_dir(resolved: Path) -> bool:
+    """Every directory from `resolved` up to `/` is owned by root or the caller and is not
+    writable by group or others, so nobody else can swap the path below it."""
+    me = os.getuid()
+    for d in (resolved, *resolved.parents):
+        st = os.lstat(d)
+        if (
+            not stat.S_ISDIR(st.st_mode)
+            or st.st_uid not in (0, me)
+            or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return False
+    return True
+
+
 class CapLedger:
     """Per-run and rolling 24-hour caps per action class (#76 section 3d).
 
@@ -467,7 +482,8 @@ class CapLedger:
     stays counted, which errs on the safe side. A request above what remains is refused
     whole, never cut down. A daily cap of 0 refuses before the store is touched. With a
     cap above 0, a store that is missing, unreadable, not the caller's own, hard-linked,
-    writable by others or in a directory others can write refuses. `reserve` never creates
+    writable by others, or below any directory that is not root's or the caller's, or
+    that group or others can write, refuses. `reserve` never creates
     the store, so deleting it does not start a new day: the launcher provisions it once
     (`provision`). Where the store lives is the host's and launcher's decision (3c);
     section 5.5 accepts a same-uid store only once 5b is proven.
@@ -515,8 +531,13 @@ class CapLedger:
     def _open_store(self) -> int:
         flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW  # no O_CREAT: a missing store refuses
         try:
-            parent = os.stat(self._store.parent)
-            fd = os.open(self._store, flags)
+            parent = self._store.parent.resolve(strict=True)
+        except OSError:
+            raise _refuse("cap_store_unreadable", "the cap store's directory is missing") from None
+        if not _trusted_dir(parent):
+            raise _refuse("cap_store_insecure", "a directory above the cap store is not trusted")
+        try:
+            fd = os.open(parent / self._store.name, flags)
         except OSError as e:
             if e.errno == errno.ELOOP:
                 raise _refuse("cap_store_insecure", "the cap store is a symlink") from None
@@ -527,7 +548,6 @@ class CapLedger:
             or st.st_uid != os.getuid()
             or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
             or st.st_nlink != 1
-            or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
         ):
             os.close(fd)
             raise _refuse("cap_store_insecure", "the cap store is not an owner-only file")

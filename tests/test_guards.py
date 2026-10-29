@@ -789,3 +789,30 @@ def test_an_invalid_keep_entry_refuses():
     assert (
         _refusal(g.ensure_none_kept, ("3",), {"3": "a@b.example"}, ["boss"]).rule == "keep_invalid"
     )
+
+
+def test_a_store_below_an_ancestor_others_can_write_is_refused(tmp_path):
+    """Write access on any ancestor lets someone swap the path below it."""
+    top = tmp_path / "open"
+    (top / "inner").mkdir(parents=True)
+    g.CapLedger.provision(top / "inner" / "caps.jsonl")
+    os.chmod(top, 0o777)
+    try:
+        caps = _caps(tmp_path, store=top / "inner" / "caps.jsonl")
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
+    finally:
+        os.chmod(top, 0o755)
+
+
+def test_a_store_reached_through_a_symlinked_directory_is_checked_where_it_resolves(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    g.CapLedger.provision(real / "caps.jsonl")
+    (tmp_path / "link").symlink_to(real)
+    _caps(tmp_path, store=tmp_path / "link" / "caps.jsonl").reserve("move", 1)
+    os.chmod(real, 0o777)
+    try:
+        caps = _caps(tmp_path, store=tmp_path / "link" / "caps.jsonl")
+        assert _refusal(caps.reserve, "move", 1).rule == "cap_store_insecure"
+    finally:
+        os.chmod(real, 0o755)
