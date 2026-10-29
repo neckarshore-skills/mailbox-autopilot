@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import stat
+import threading
 import time
 import unicodedata
 from collections.abc import Iterable, Mapping
@@ -164,10 +165,18 @@ SPECIAL_USE = frozenset(
     f.casefold()
     for f in ("\\All", "\\Archive", "\\Drafts", "\\Flagged", "\\Junk", "\\Sent", "\\Trash")
 )
+
+
+def _fold(s: str) -> str:
+    """NFKC, case-folded, whitespace runs collapsed: fullwidth or doubled-space forms of
+    a trash name compare equal to it (security review of 3b)."""
+    return " ".join(unicodedata.normalize("NFKC", s).casefold().split())
+
+
 # Names that clients and server retention rules treat as trash or junk without any
-# SPECIAL-USE flag (#76 section 3a). Compared per path segment, NFC and case-folded.
+# SPECIAL-USE flag (#76 section 3a). Compared per path segment, folded by _fold.
 TRASH_OR_JUNK_NAMES = frozenset(
-    unicodedata.normalize("NFC", n).casefold()
+    _fold(n)
     for n in (
         "Bin",
         "Bulk Mail",
@@ -189,8 +198,9 @@ TRASH_OR_JUNK_NAMES = frozenset(
 )
 
 
-def _fold(s: str) -> str:
-    return unicodedata.normalize("NFC", s).casefold()
+def _is_inbox(name: str) -> bool:
+    """RFC 3501: INBOX is case-insensitive, ASCII only; no compatibility forms."""
+    return name.isascii() and name.upper() == "INBOX"
 
 
 def check_folder_name(name) -> str:
@@ -236,7 +246,11 @@ class FolderView:
             check_folder_name(namespace)
         except GuardRefused:
             raise _refuse("namespace_invalid", "the bot namespace is not a valid name") from None
-        if _fold(namespace) == "inbox" or self._trash_like(namespace):
+        try:
+            self._check_segments(namespace)
+        except GuardRefused:
+            raise _refuse("namespace_invalid", "the bot namespace is not a valid name") from None
+        if _is_inbox(namespace) or self._trash_like(namespace):
             raise _refuse("namespace_invalid", "the bot namespace may not be INBOX or a trash")
         ns = self._folders.get(namespace)
         if ns is not None and ns.flags & SPECIAL_USE:
@@ -247,12 +261,17 @@ class FolderView:
     # helpers
 
     def _get(self, name: str) -> Folder | None:
-        if _fold(name) == "inbox":  # RFC 3501: INBOX is case-insensitive
-            return next((f for f in self._folders.values() if _fold(f.name) == "inbox"), None)
+        if _is_inbox(name):  # RFC 3501: INBOX is case-insensitive
+            return next((f for f in self._folders.values() if _is_inbox(f.name)), None)
         return self._folders.get(name)
 
     def _segments(self, name: str) -> list[str]:
         return name.split(self.delim) if self.delim else [name]
+
+    def _check_segments(self, name: str) -> None:
+        """No empty segment and no segment with an edge space, which would hide a name."""
+        if any(s == "" or s != s.strip() for s in self._segments(name)):
+            raise _refuse("folder_name", "a folder name segment is empty or has an edge space")
 
     def _trash_like(self, name: str) -> bool:
         return any(_fold(s) in TRASH_OR_JUNK_NAMES for s in self._segments(name))
@@ -263,7 +282,8 @@ class FolderView:
         return bool(self.delim) and name.startswith(self.namespace + self.delim)
 
     def _existing(self, name) -> Folder:
-        f = self._get(check_folder_name(name))
+        self._check_segments(check_folder_name(name))
+        f = self._get(name)
         if f is None:
             raise _refuse("folder_unknown", "the folder is not in the server's LIST")
         return f
@@ -282,7 +302,7 @@ class FolderView:
 
     def check_source(self, name) -> str:
         f = self._existing(name)
-        inbox = _fold(f.name) == "inbox"
+        inbox = _is_inbox(f.name)
         if not (inbox or self.in_namespace(f.name)):
             raise _refuse("source_not_allowed", "sources are INBOX and the namespace")
         if not inbox and (f.flags & SPECIAL_USE or self._trash_like(f.name)):
@@ -293,8 +313,7 @@ class FolderView:
         check_folder_name(name)
         if not self.in_namespace(name):
             raise _refuse("folder_outside_namespace", "new folders go inside the namespace only")
-        if any(s == "" for s in self._segments(name)):
-            raise _refuse("folder_name", "the folder name has an empty segment")
+        self._check_segments(name)
         if self._get(name) is not None:
             raise _refuse("folder_exists", "the folder exists already")
         if self._trash_like(name):
@@ -311,9 +330,7 @@ class FolderView:
             sorted(
                 f.name
                 for f in self._folders.values()
-                if _fold(f.name) == "inbox"
-                or self.in_namespace(f.name)
-                or f.name in self.owner_targets
+                if _is_inbox(f.name) or self.in_namespace(f.name) or f.name in self.owner_targets
             )
         )
 
@@ -375,20 +392,24 @@ class PreviewLedger:
         self._lifetime = lifetime
         self._clock = clock
         self._plans: dict[str, tuple[Plan, float]] = {}
+        self._lock = threading.Lock()
 
     def issue(self, plan: Plan) -> str:
         plan = _checked_plan(plan)
-        now = self._clock()
-        self._plans = {t: e for t, e in self._plans.items() if e[1] >= now}
         canonical = json.dumps(plan.__dict__, sort_keys=True, separators=(",", ":"))
         token = hashlib.sha256(secrets.token_bytes(16) + canonical.encode()).hexdigest()
-        self._plans[token] = (plan, now + self._lifetime)
+        with self._lock:
+            now = self._clock()
+            for expired in [t for t, e in self._plans.items() if e[1] < now]:
+                del self._plans[expired]  # in place, so a concurrent pop cannot be undone
+            self._plans[token] = (plan, now + self._lifetime)
         return token
 
     def redeem(self, token, *, action: str, account: str) -> Plan:
         if type(token) is not str or not _TOKEN_RE.fullmatch(token):
             raise _mismatch("token_invalid", "the preview token is malformed")
-        entry = self._plans.pop(token, None)
+        with self._lock:
+            entry = self._plans.pop(token, None)
         if entry is None:
             raise _mismatch("token_unknown", "no preview issued this token, or it was used")
         plan, expires = entry

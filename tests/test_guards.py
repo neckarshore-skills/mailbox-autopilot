@@ -628,3 +628,76 @@ def test_invalid_caps_refuse_everything(tmp_path, per_run):
 )
 def test_an_unknown_action_or_a_bad_count_is_refused(tmp_path, action, count):
     assert _refusal(_caps(tmp_path).reserve, action, count).rule in ("action_unknown", "cap_count")
+
+
+# --- security review of 3b: name normalisation and the token lock --------------------
+
+
+@pytest.mark.parametrize(
+    "name, rule",
+    [
+        ("Bot/Trash ", "folder_name"),  # an edge space would hide the trash name
+        ("Bot/ Trash", "folder_name"),
+        ("Bot/Ｔｒａｓｈ", "folder_trash_like"),  # fullwidth letters, NFKC folds them
+        ("Bot/Deleted  Items", "folder_trash_like"),  # a run of spaces
+        ("Bot/ＳＰＡＭ", "folder_trash_like"),
+    ],
+)
+def test_a_trash_name_cannot_hide_behind_spaces_or_compatibility_forms(name, rule):
+    assert _refusal(_view().check_new_folder, name).rule == rule
+
+
+def test_an_existing_folder_with_an_edge_space_is_no_target():
+    v = _view([*LISTING, _entry("Bot/Trash ")])
+    assert _refusal(v.check_target, "Bot/Trash ").rule == "folder_name"
+
+
+class _RecordingLock:
+    def __init__(self):
+        self.entered = 0
+
+    def __enter__(self):
+        self.entered += 1
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_issue_and_redeem_hold_the_ledger_lock():
+    """A concurrent issue rebuilt the plan table from a snapshot and could bring back a
+    token another thread had just redeemed. Both paths now run under one lock."""
+    ledger = g.PreviewLedger()
+    lock = _RecordingLock()
+    ledger._lock = lock
+    token = ledger.issue(_plan())
+    ledger.redeem(token, action="move", account="bot")
+    assert lock.entered == 2
+
+
+def test_tokens_redeemed_from_many_threads_are_spent_once():
+    import threading
+
+    ledger = g.PreviewLedger()
+    tokens = [ledger.issue(_plan()) for _ in range(200)]
+    wins = []
+
+    def worker():
+        for t in tokens:
+            try:
+                ledger.redeem(t, action="move", account="bot")
+                wins.append(t)
+            except g.GuardRefused:
+                pass
+            ledger.issue(_plan())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert sorted(wins) == sorted(tokens)
+
+
+def test_inbox_is_case_insensitive_but_not_a_fullwidth_form():
+    assert _view().check_source("iNbOx") == "INBOX"
+    assert _refusal(_view().check_source, "ＩＮＢＯＸ").rule == "folder_unknown"
