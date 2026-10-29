@@ -601,6 +601,8 @@ def test_the_store_is_provisioned_owner_only_and_records_no_values(tmp_path):
         '{"ts": 1}\n',
         '{"ts": "x", "action": "move", "count": 1, "run": "r"}\n',
         "[1]\n",
+        # a negative count would lower the 24-hour total (D15; James on #93)
+        '{"ts": 1, "action": "move", "count": -5, "run": "r"}\n',
     ],
 )
 def test_a_corrupt_store_refuses_when_the_cap_is_above_zero(tmp_path, content):

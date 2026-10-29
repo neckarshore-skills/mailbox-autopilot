@@ -593,7 +593,12 @@ class CapLedger:
             for line in b"".join(chunks).decode("utf-8").splitlines():
                 r = json.loads(line)
                 ts, cls, n = r["ts"], r["action"], r["count"]
-                if type(ts) not in (int, float) or type(n) is not int or cls not in ACTION_CLASSES:
+                if (
+                    type(ts) not in (int, float)
+                    or type(n) is not int
+                    or n < 1
+                    or cls not in ACTION_CLASSES
+                ):
                     raise ValueError("bad record")
                 if cls == action and ts > now - DAY_SECONDS:  # a future entry counts too
                     total += n
