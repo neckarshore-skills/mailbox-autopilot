@@ -24,20 +24,45 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+from .guards import ACTION_CLASSES, GuardRefused, check_folder_name
+from .manage.headers import is_bare_address
+from .operations.selection import parse_keep
 
 ANCHOR_DIR = Path("/Library/Application Support/mailbox-autopilot")
 PROFILE_NAME = "profile.json"
 ANCHOR_OWNER_UID = 0
 BOT_GROUP = "mailbox-autopilot-bot"
 MAX_PROFILE_BYTES = 64 * 1024
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2 (#76 slice 3c-1): v1 was never installed, so it is refused
 READ_LEVELS = frozenset({"lean"})  # D7: the first rollout reads headers only
 REFUSED_EXIT = 6  # exit codes 0-5 are taken (README)
 
-_KEYS = frozenset({"schema_version", "bot_user", "account", "read_level"})
+_KEYS = frozenset(
+    {
+        "schema_version",
+        "bot_user",
+        "account",
+        "email",
+        "server",
+        "read_level",
+        "namespace",
+        "owner_targets",
+        "caps",
+        "keep",
+    }
+)
+_CAP_KEYS = frozenset({"per_run", "per_day"})
+# A plain DNS host name, at least two labels, ASCII: no port, no scheme, no IP literal.
+# The server decides where the bot's password is sent, which is why it lives here and not
+# in the bot user's keychain or config (#76 slice 3c-1).
+_LABEL = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
+_SERVER_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})+", re.ASCII)
+MAX_SERVER = 253
 
 
 class ProfileRefused(Exception):
@@ -57,6 +82,15 @@ class Profile:
     account: str
     read_level: str
     sha256: str
+    # v2: the account's address and server, the bot's folders, its caps and the keep list
+    # all come from this root-owned file, never from the bot user's config or keychain
+    email: str
+    server: str
+    namespace: str
+    owner_targets: tuple[str, ...]
+    per_run: dict
+    per_day: dict
+    keep: tuple[str, ...]
 
 
 # --- system lookups (replaced in tests) -------------------------------------------
@@ -124,7 +158,82 @@ def _parse(data: bytes, sha256: str) -> Profile:
         raise _invalid("account must be a printable alias")
     if not isinstance(level, str) or level not in READ_LEVELS:
         raise _invalid(f"read_level must be one of {sorted(READ_LEVELS)}")
-    return Profile(bot_user=user, bot_uid=uid, account=account, read_level=level, sha256=sha256)
+    return Profile(
+        bot_user=user,
+        bot_uid=uid,
+        account=account,
+        read_level=level,
+        sha256=sha256,
+        email=_email(doc["email"]),
+        server=_server(doc["server"]),
+        namespace=_namespace(doc["namespace"]),
+        owner_targets=_owner_targets(doc["owner_targets"]),
+        **_caps(doc["caps"]),
+        keep=_keep(doc["keep"]),
+    )
+
+
+def _email(value) -> str:
+    if not isinstance(value, str) or not is_bare_address(value):
+        raise _invalid("email must be one bare ASCII address")
+    return value
+
+
+def _server(value) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > MAX_SERVER
+        or not _SERVER_RE.fullmatch(value)
+        or value.replace(".", "").isdigit()
+    ):
+        raise _invalid("server must be a plain host name")
+    return value
+
+
+def _folder(value, what: str) -> str:
+    try:
+        return check_folder_name(value)
+    except GuardRefused:
+        raise _invalid(f"{what} is not a valid folder name") from None
+
+
+def _namespace(value) -> str:
+    name = _folder(value, "namespace")
+    if name.isascii() and name.upper() == "INBOX":
+        raise _invalid("namespace may not be INBOX")
+    return name
+
+
+def _owner_targets(value) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise _invalid("owner_targets must be a list")
+    return tuple(_folder(v, "an owner target") for v in value)
+
+
+def _caps(value) -> dict:
+    if not isinstance(value, dict) or set(value) != _CAP_KEYS:
+        raise _invalid(f"caps must be an object with exactly the keys {sorted(_CAP_KEYS)}")
+    out = {}
+    for key in sorted(_CAP_KEYS):
+        caps = value[key]
+        if (
+            not isinstance(caps, dict)
+            or set(caps) != set(ACTION_CLASSES)
+            or any(type(v) is not int or v < 0 for v in caps.values())
+        ):
+            raise _invalid(f"caps.{key} must name every action class with a count >= 0")
+        out[key] = dict(caps)
+    return out
+
+
+def _keep(value) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+        raise _invalid("keep must be a list of addresses and @domains")
+    try:
+        parse_keep(value)
+    except ValueError:
+        raise _invalid("keep has an entry that is no address and no @domain") from None
+    return tuple(value)
 
 
 def _root_only_file(st: os.stat_result) -> bool:

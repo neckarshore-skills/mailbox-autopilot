@@ -486,6 +486,66 @@ def _is_append_only(st) -> bool:
     return bool(getattr(st, "st_flags", 0) & stat.SF_APPEND)
 
 
+def open_append_only(path: Path, *, prefix: str, what: str) -> int:
+    """Open an existing store for appending, or refuse. Shared by the cap store and the
+    host audit log (#76 D15, slice 3c-1); each refusal is named `<prefix>_<reason>`.
+
+    No O_CREAT, so a missing file refuses: root provisions it. The file must be the
+    caller's own regular file with one link, that group and others cannot write, and
+    that carries the system append-only flag, checked on the opened descriptor. Every
+    directory above it must pass `_trusted_dir`.
+    """
+    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+    path = Path(path)
+    try:
+        parent = path.parent.resolve(strict=True)
+    except (OSError, RuntimeError):  # 3.11 raises RuntimeError on a symlink loop
+        raise _refuse(f"{prefix}_dir_missing", f"{what}'s directory is missing") from None
+    if not _trusted_dir(parent):
+        raise _refuse(f"{prefix}_dir_untrusted", f"a directory above {what} is not trusted")
+    try:
+        fd = os.open(parent / path.name, flags)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise _refuse(f"{prefix}_symlink", f"{what} is a symlink") from None
+        if e.errno == errno.ENOENT:
+            raise _refuse(f"{prefix}_missing", f"{what} does not exist") from None
+        raise _refuse(f"{prefix}_unopenable", f"{what} cannot be opened") from None
+    st = os.fstat(fd)
+    if (
+        not stat.S_ISREG(st.st_mode)
+        or st.st_uid != os.getuid()
+        or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or st.st_nlink != 1
+    ):
+        os.close(fd)
+        raise _refuse(f"{prefix}_file_untrusted", f"{what} is not an owner-only file")
+    if not _is_append_only(st):  # checked on the opened descriptor, after the rest
+        os.close(fd)
+        raise _refuse(f"{prefix}_not_append_only", f"{what} lacks the system append-only flag")
+    return fd
+
+
+def check_no_symlink_component(path: Path, *, prefix: str, what: str) -> None:
+    """Refuse a configured path with a symlink in any directory above the file.
+
+    `_trusted_dir` checks where a path resolves, and macOS has no protected_symlinks, so
+    a link planted earlier in a shared ancestor would be followed and only its target
+    checked. The host calls this on its fixed paths before it opens them (James on #91,
+    contract for 3c). The file itself is the opener's: O_NOFOLLOW refuses a link there.
+    """
+    path = Path(path)
+    if not path.is_absolute():
+        raise _refuse(f"{prefix}_path_relative", f"{what}'s path is not absolute")
+    for d in path.parents:
+        try:
+            st = os.lstat(d)
+        except OSError:
+            raise _refuse(f"{prefix}_dir_missing", f"{what}'s directory is missing") from None
+        if stat.S_ISLNK(st.st_mode):
+            raise _refuse(f"{prefix}_path_symlink", f"{what}'s path contains a symlink")
+
+
 class CapLedger:
     """Per-run and rolling 24-hour caps per action class (#76 section 3d).
 
@@ -549,38 +609,7 @@ class CapLedger:
         self._used[action] += count
 
     def _open_store(self) -> int:
-        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW  # no O_CREAT: a missing store refuses
-        try:
-            parent = self._store.parent.resolve(strict=True)
-        except OSError:
-            raise _refuse("cap_store_dir_missing", "the cap store's directory is missing") from None
-        if not _trusted_dir(parent):
-            raise _refuse(
-                "cap_store_dir_untrusted", "a directory above the cap store is not trusted"
-            )
-        try:
-            fd = os.open(parent / self._store.name, flags)
-        except OSError as e:
-            if e.errno == errno.ELOOP:
-                raise _refuse("cap_store_symlink", "the cap store is a symlink") from None
-            if e.errno == errno.ENOENT:
-                raise _refuse("cap_store_missing", "the cap store does not exist") from None
-            raise _refuse("cap_store_unopenable", "the cap store cannot be opened") from None
-        st = os.fstat(fd)
-        if (
-            not stat.S_ISREG(st.st_mode)
-            or st.st_uid != os.getuid()
-            or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-            or st.st_nlink != 1
-        ):
-            os.close(fd)
-            raise _refuse("cap_store_file_untrusted", "the cap store is not an owner-only file")
-        if not _is_append_only(st):  # checked on the opened descriptor, after the rest
-            os.close(fd)
-            raise _refuse(
-                "cap_store_not_append_only", "the cap store lacks the system append-only flag"
-            )
-        return fd
+        return open_append_only(self._store, prefix="cap_store", what="the cap store")
 
     @staticmethod
     def _used_today(fd: int, action: str, now: float) -> int:
