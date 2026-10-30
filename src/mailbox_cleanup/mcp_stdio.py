@@ -80,7 +80,7 @@ class StdioServer:
             return None
         try:
             msg = json.loads(line.decode("utf-8"), parse_constant=_no_constants)
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):  # deep nesting
             return _error(None, PARSE_ERROR, "parse error")
         try:
             return self._dispatch(msg)

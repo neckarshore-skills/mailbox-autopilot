@@ -273,3 +273,18 @@ def test_serve_ends_at_end_of_input():
     out = io.BytesIO()
     _server().serve(io.BytesIO(b""), out)
     assert out.getvalue() == b""
+
+
+def test_deep_nesting_is_a_parse_error_not_a_crash():
+    """json.loads raises RecursionError, not ValueError, on deep nesting. The arguments of
+    a tools/call are model-chosen, so a crash here would end the host (security review
+    of f63c581)."""
+    deep = b"[" * 200_000 + b"]" * 200_000
+    assert len(deep) < m.MAX_LINE
+    r = _send(_server(), deep)
+    assert r["error"]["code"] == m.PARSE_ERROR and r["id"] is None
+    s = _server()
+    _init(s)
+    nested = b'{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"t","arguments":'
+    out = s.handle_line(nested + b"[" * 200_000 + b"]" * 200_000 + b"}}")
+    assert json.loads(out)["error"]["code"] == m.PARSE_ERROR
