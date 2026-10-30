@@ -322,16 +322,32 @@ jq -s 'group_by(.account + "/" + .subcommand) | map({op: (.[0].account + "/" + .
 
 ## Running as an unattended bot
 
-> **Note:** In progress (#76). This section grows with each slice and lists only what is built. Until the MCP host, the guards and the launcher land, no unattended bot can run.
+> **Note:** In progress (#76). This section grows with each slice and lists only what is built. The MCP host runs since slice 3c-1 but offers no tool yet; until its tools and the launcher land, no unattended bot can run.
 
 An unattended bot reads untrusted mail, so its limits come from the tool and from root, never from the bot behaving well. Two root-controlled facts decide what it may do, and neither comes from env, `HOME` or a file the bot can write:
 
 1. **Identity.** The bot's macOS user is a member of the group `mailbox-autopilot-bot`, which root creates at install. A member is the bot. Only the bot's user belongs in that group.
-2. **The profile.** A root-owned file, `/Library/Application Support/mailbox-autopilot/profile.json`. The directory, its parent and the file belong to root and are writable by nobody else, and the file is no symlink. Schema version 1:
+2. **The profile.** A root-owned file, `/Library/Application Support/mailbox-autopilot/profile.json`. The directory, its parent and the file belong to root and are writable by nobody else, and the file is no symlink. Everything that limits the bot lives here, including the mailbox's address and IMAP server, because the server decides where the bot's password is sent; only the password stays in the bot user's keychain. Schema version 2 (version 1 was never installed and is refused):
 
 ```json
-{"schema_version": 1, "bot_user": "<the bot's user name>", "account": "<account alias in the bot user's config>", "read_level": "lean"}
+{
+  "schema_version": 2,
+  "bot_user": "<the bot's user name>",
+  "account": "<a short alias, used in the audit log>",
+  "email": "<the mailbox address>",
+  "server": "<the IMAP host name, for example imap.example.org>",
+  "read_level": "lean",
+  "namespace": "Bot",
+  "owner_targets": [],
+  "caps": {
+    "per_run": {"create_folder": 5, "draft": 5, "flag": 10, "move": 50},
+    "per_day": {"create_folder": 0, "draft": 0, "flag": 0, "move": 0}
+  },
+  "keep": ["<an address>", "@<a domain>"]
+}
 ```
+
+3. **The host audit log.** `host-audit.log` in the same directory. Root creates it empty, gives it to the bot user with mode `0600` and sets the system append-only flag (`chflags sappend`), so the bot can add lines but cannot truncate, delete or reset it. Without it the MCP host does not start.
 
 **Scope.** These limits hold for the bot *session*: a model that has no shell and reaches mail only through this tool. They do not contain the bot's macOS *user* with a shell, which can run its own Python and read its own keychain. That user is kept out by the root-owned launcher, and the bot's app password is the kill switch.
 
@@ -342,7 +358,7 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 1 | The CLI refuses every member of the bot group, before click parses anything: unknown commands, `--help` and `--version` included. Exit 6, `profile_refused`, JSON | `cli.py` `_ProfileGuardedGroup.main`, `profile.cli_gate` | `test_the_bot_is_refused_before_click_parses` |
 | 2 | Identity is group membership, whatever state the profile is in | `profile._bot_group`, `profile._is_member` | `test_a_bot_group_member_is_refused_even_without_any_profile`, `test_the_real_group_lookup_recognises_a_member_by_process_gid` |
 | 3 | A profile counts only if parent, directory and file are root-only and the file is a regular file, checked again on the opened descriptor | `profile.load_profile`, `profile._root_only_file` | the `*_insecure` tests, `test_the_opened_file_is_checked_again` |
-| 4 | The schema is strict: unknown keys, unknown users, `root` and any read level other than the string `lean` are refused | `profile._parse` | `test_an_invalid_profile_is_refused` |
+| 4 | The schema is strict (version 2): unknown or missing keys, version 1, unknown users, `root`, any read level other than the string `lean`, a server that is not a plain host name (no port, scheme or IP), an address that is not one bare address, invalid folder names, caps that do not name every action class with a count of 0 or more, and keep entries that are no address or `@domain` are refused | `profile._parse` | `test_an_invalid_profile_is_refused`, `test_an_invalid_v2_field_is_refused`, `test_every_v2_key_is_required`, `test_a_v1_profile_is_refused` |
 | 5 | The MCP host's entry has no unrestricted mode: it returns the profile only to the bot user it names | `profile.host_profile` | `test_the_host_refuses_every_other_state` |
 | 6 | An anchor without the group is an incomplete install: everyone is refused | `profile.cli_gate` | `test_an_anchor_without_the_bot_group_refuses_everyone` |
 | 7 | A refusal is audited in the caller's home from the user database; `HOME` and `MAILBOX_CLEANUP_AUDIT_LOG` cannot move it; no argument is recorded; the refusal does not depend on the write | `audit.log_refusal`, `cli._refuse_for_profile` | `test_the_refusal_record_ignores_home_and_the_audit_override`, `test_the_refusal_does_not_depend_on_the_audit_write` |
@@ -363,7 +379,19 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 17 | The apply takes only the preview token: single use, 5 minutes, bound to the account, source, UIDVALIDITY, UIDs and target, so the same count with other messages is refused | `guards.PreviewLedger`, `guards.check_uidvalidity` | `test_the_same_count_with_a_different_uid_set_cannot_be_applied`, `test_a_changed_uidvalidity_refuses_the_apply` |
 | 18 | Caps per run and per rolling 24 hours for moves, flags, folders and drafts; in the first rollout every daily cap is 0. A cap hit is `cap_reached`, exit 7 | `guards.CapLedger` | `test_a_daily_cap_of_zero_refuses_without_touching_the_store`, `test_the_daily_cap_counts_across_runs` |
 | 19 | The keep list is checked again right before `MOVE` and `STORE`; a sender that cannot be read refuses. A keep-list hit is no proof of the sender: `From` can be spoofed | `guards.ensure_none_kept` | `test_a_kept_sender_refuses_the_whole_request_without_naming_it`, `test_a_sender_that_is_not_one_bare_address_is_refused` |
-| 20 | The bot cannot reset the 24-hour count (#76 D15): the store must be its own one-link file carrying the system append-only flag, which only root sets and clears (`chflags sappend`); the user flag is not enough. Every directory above it is root's or the bot's, and others may write one only if it is sticky, as `/tmp`. A missing store refuses instead of starting a new day. That the flag holds at the target Mac's securelevel is unmeasured until 5b | `guards.CapLedger._open_store`, `guards._is_append_only`, `guards._trusted_dir` | `test_a_store_without_the_system_append_only_flag_is_refused`, `test_the_user_append_only_flag_is_not_enough`, `test_a_sticky_directory_owned_by_someone_else_is_not_trusted`, `test_a_deleted_store_refuses_instead_of_starting_a_new_day` |
+| 20 | The bot cannot reset the 24-hour count (#76 D15): the store must be its own one-link file carrying the system append-only flag, which only root sets and clears (`chflags sappend`); the user flag is not enough. Every directory above it is root's or the bot's, and others may write one only if it is sticky, as `/tmp`. A missing store refuses instead of starting a new day. That the flag holds at the target Mac's securelevel is unmeasured until 5b | `guards.open_append_only`, `guards._is_append_only`, `guards._trusted_dir` | `test_a_store_without_the_system_append_only_flag_is_refused`, `test_the_user_append_only_flag_is_not_enough`, `test_a_sticky_directory_owned_by_someone_else_is_not_trusted`, `test_a_deleted_store_refuses_instead_of_starting_a_new_day` |
+
+**The MCP host (slice 3c-1).** `mailbox-autopilot-host` is the bot's only interface: a local MCP server over stdio that calls the library in-process. It offers no tool yet; every tool will take the path below.
+
+| # | Guarantee | Code | Test (`tests/test_bot_host.py`, `tests/test_mcp_stdio.py`) |
+|---|---|---|---|
+| 21 | The host serves only the bot user that a valid profile names; no flag, env variable or test mode skips the check. Otherwise it writes the rule to stderr and exits 6 without serving | `host.run`, `profile.host_profile` | `test_no_bot_group_means_no_service`, `test_a_caller_outside_the_group_is_not_served`, `test_a_missing_profile_means_no_service_and_is_audited`, `test_the_real_entry_point_refuses_on_a_machine_without_an_install` |
+| 22 | No service without the host audit log: the root-provisioned, bot-owned, append-only file at its fixed path, with no symlink in any directory of that path. Env cannot move it | `host.HostAudit`, `guards.open_append_only`, `guards.check_no_symlink_component` | `test_a_missing_audit_log_means_no_service`, `test_an_audit_log_without_the_system_flag_means_no_service`, `test_a_symlink_in_the_audit_log_path_means_no_service`, `test_the_audit_log_cannot_be_redirected_by_env` |
+| 23 | A tool the profile does not offer is refused and audited before any argument is looked at; garbage arguments do not change the refusal | `host.Host.call` | `test_a_tool_the_profile_does_not_offer_is_refused_and_audited`, `test_garbage_arguments_do_not_change_the_refusal` |
+| 24 | The host audit records no argument and no value, and records a tool name it does not know as `unknown` | `host.Host._record` | `test_no_argument_value_reaches_the_audit_log`, `test_an_unknown_tool_name_is_recorded_as_unknown` |
+| 25 | A result leaves the host only after its audit record is written; a refusal stands even when its record cannot be written | `host.Host.call`, `host.Host._refused` | `test_no_data_leaves_the_host_when_its_audit_line_cannot_be_written`, `test_a_refusal_stands_when_its_audit_line_cannot_be_written` |
+| 26 | Only protocol frames reach stdout; a stray print or a write to fd 1 lands on stderr | `host.main` | `test_a_stray_print_never_reaches_the_protocol_stream` |
+| 27 | A crash in a tool, or deep nesting in a request, returns an error with no detail and does not end the host | `host.Host.call`, `mcp_stdio.StdioServer` | `test_a_crash_inside_a_tool_returns_no_detail`, `test_deep_nesting_is_a_parse_error_not_a_crash`, `test_an_exception_in_the_host_is_an_internal_error_without_detail` |
 
 ## Exit codes and error codes
 

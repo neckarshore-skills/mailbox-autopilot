@@ -237,11 +237,10 @@ def run(inp, out, *, uid: int) -> int:
 
 def main() -> int:
     """Entry point. File descriptor 1 is the protocol stream, so it is taken over first:
-    the frames go to a private copy, and anything else that writes to fd 1 or
-    sys.stdout (a stray print, a library) lands on stderr instead."""
+    the frames go to a private copy, and fd 1 becomes a copy of stderr, so anything else
+    that writes to it (a stray print, sys.stdout, a library, a child) lands on stderr."""
     frames = os.fdopen(os.dup(1), "wb")
     os.dup2(2, 1)
-    sys.stdout = sys.stderr
     try:
         return run(sys.stdin.buffer, frames, uid=os.getuid())
     finally:
