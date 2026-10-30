@@ -939,3 +939,109 @@ def test_a_sender_that_is_not_one_bare_address_is_refused(sender):
     Anything else refuses instead of failing the keep match open (advisor on #91)."""
     e = _refusal(g.ensure_none_kept, ("3",), {"3": sender}, KEEP)
     assert e.rule == "keep_unverifiable"
+
+
+# --- the trusted append-only open, shared by the cap store and the host log (3c-1) ----
+
+
+def _audit_open(path):
+    return g.open_append_only(path, prefix="audit_log", what="the host audit log")
+
+
+def test_the_shared_open_names_its_rules_after_the_file(tmp_path):
+    """One opener for the cap store and the host audit log; the rule says which file."""
+    log = tmp_path / "host-audit.log"
+    assert _refusal(_audit_open, log).rule == "audit_log_missing"
+    assert _refusal(_audit_open, tmp_path / "gone" / "x.log").rule == "audit_log_dir_missing"
+    real = tmp_path / "real.log"
+    g.CapLedger.provision(real)
+    log.symlink_to(real)
+    assert _refusal(_audit_open, log).rule == "audit_log_symlink"
+
+
+def test_the_shared_open_returns_an_append_only_descriptor(tmp_path):
+    log = tmp_path / "host-audit.log"
+    g.CapLedger.provision(log)
+    fd = _audit_open(log)
+    try:
+        os.write(fd, b"one\n")
+    finally:
+        os.close(fd)
+    assert log.read_bytes() == b"one\n"
+
+
+def test_the_shared_open_refuses_a_file_others_can_write(tmp_path):
+    log = tmp_path / "host-audit.log"
+    g.CapLedger.provision(log)
+    os.chmod(log, 0o622)
+    assert _refusal(_audit_open, log).rule == "audit_log_file_untrusted"
+
+
+def test_the_shared_open_refuses_without_the_system_flag(tmp_path, real_append_check):
+    log = tmp_path / "host-audit.log"
+    g.CapLedger.provision(log)
+    assert _refusal(_audit_open, log).rule == "audit_log_not_append_only"
+
+
+def test_the_shared_open_refuses_an_untrusted_directory(tmp_path):
+    d = tmp_path / "shared"
+    d.mkdir()
+    g.CapLedger.provision(d / "host-audit.log")
+    os.chmod(d, 0o777)
+    try:
+        assert _refusal(_audit_open, d / "host-audit.log").rule == "audit_log_dir_untrusted"
+    finally:
+        os.chmod(d, 0o755)
+
+
+def test_a_symlink_loop_above_the_store_is_a_refusal_not_a_crash(tmp_path):
+    """Python 3.11's Path.resolve raises RuntimeError on a loop, not OSError (James,
+    optional point on #93). A crash would escape the host's refusal path."""
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    store = tmp_path / "a" / "caps.jsonl"
+    assert _refusal(_caps(tmp_path, store=store).reserve, "move", 1).rule == (
+        "cap_store_dir_missing"
+    )
+    assert _refusal(_audit_open, store).rule == "audit_log_dir_missing"
+
+
+# --- no symlink anywhere in a configured path (James on #91, contract for 3c) ---------
+
+
+def _no_link(path):
+    return g.check_no_symlink_component(path, prefix="cap_store", what="the cap store")
+
+
+def test_a_plain_path_has_no_symlink_component(tmp_path):
+    d = tmp_path.resolve() / "real"
+    d.mkdir()
+    _no_link(d / "caps.jsonl")  # the file need not exist; the opener reports that
+
+
+def test_a_symlinked_directory_in_the_path_is_refused(tmp_path):
+    """_trusted_dir checks the resolved parent, and macOS has no protected_symlinks, so a
+    link planted earlier in a shared ancestor would be followed. The host refuses any
+    link in the path before it opens anything."""
+    real = tmp_path.resolve() / "real"
+    real.mkdir()
+    (tmp_path.resolve() / "link").symlink_to(real)
+    e = _refusal(_no_link, tmp_path.resolve() / "link" / "caps.jsonl")
+    assert (e.error_code, e.rule) == ("profile_refused", "cap_store_path_symlink")
+
+
+def test_a_symlink_high_up_in_the_path_is_refused(tmp_path):
+    real = tmp_path.resolve() / "real"
+    (real / "a" / "b").mkdir(parents=True)
+    (tmp_path.resolve() / "link").symlink_to(real)
+    path = tmp_path.resolve() / "link" / "a" / "b" / "caps.jsonl"
+    assert _refusal(_no_link, path).rule == "cap_store_path_symlink"
+
+
+def test_a_relative_configured_path_is_refused():
+    assert _refusal(_no_link, Path("caps.jsonl")).rule == "cap_store_path_relative"
+
+
+def test_a_missing_directory_in_the_configured_path_is_refused(tmp_path):
+    path = tmp_path.resolve() / "gone" / "caps.jsonl"
+    assert _refusal(_no_link, path).rule == "cap_store_dir_missing"

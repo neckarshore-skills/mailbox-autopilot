@@ -20,8 +20,23 @@ OTHER = "nobody"  # exists on macOS and Linux
 GID = 4242424  # a gid this process is not in
 
 
+def _caps(n):
+    return {c: n for c in ("create_folder", "draft", "flag", "move")}
+
+
 def _valid(**over):
-    doc = {"schema_version": 1, "bot_user": ME, "account": "bot", "read_level": "lean"}
+    doc = {
+        "schema_version": 2,
+        "bot_user": ME,
+        "account": "bot",
+        "email": "bot@example.org",
+        "server": "imap.example.org",
+        "read_level": "lean",
+        "namespace": "Bot",
+        "owner_targets": [],
+        "caps": {"per_run": _caps(5), "per_day": _caps(0)},
+        "keep": ["boss@example.org", "@bank.example"],
+    }
     doc.update(over)
     return doc
 
@@ -97,7 +112,7 @@ def test_an_anchor_without_the_file_is_missing(anchor):
         "[]",
         json.dumps({k: v for k, v in _valid().items() if k != "account"}),
         json.dumps(_valid(extra=1)),
-        json.dumps(_valid(schema_version=2)),
+        json.dumps(_valid(schema_version=3)),
         json.dumps(_valid(schema_version=True)),
         json.dumps(_valid(bot_user="")),
         json.dumps(_valid(bot_user="no-such-user-4242")),
@@ -129,6 +144,69 @@ def test_an_anchor_without_the_file_is_missing(anchor):
 )
 def test_an_invalid_profile_is_refused(anchor, raw):
     anchor.write(raw=raw)
+    assert _rule(profile.load_profile) == "profile_invalid"
+
+
+# --- schema v2 (#76 slice 3c-1): what the host needs comes from the root-owned file ---
+
+
+def test_a_v2_profile_carries_what_the_host_needs(anchor):
+    anchor.write(_valid(owner_targets=["Projekte"]))
+    p = profile.load_profile()
+    assert (p.email, p.server, p.namespace) == ("bot@example.org", "imap.example.org", "Bot")
+    assert p.owner_targets == ("Projekte",)
+    assert p.per_run == _caps(5) and p.per_day == _caps(0)
+    assert p.keep == ("boss@example.org", "@bank.example")
+
+
+def test_a_v1_profile_is_refused(anchor):
+    """Nothing was installed with v1, so there is no migration: a v1 file is invalid."""
+    anchor.write({"schema_version": 1, "bot_user": ME, "account": "bot", "read_level": "lean"})
+    assert _rule(profile.load_profile) == "profile_invalid"
+
+
+_V2_INVALID = {
+    # the server decides where the password goes, so it must be a plain host name (#76 3c)
+    "server-empty": {"server": ""},
+    "server-not-str": {"server": 993},
+    "server-with-port": {"server": "imap.example.org:993"},
+    "server-with-scheme": {"server": "imaps://imap.example.org"},
+    "server-single-label": {"server": "localhost"},
+    "server-ip": {"server": "127.0.0.1"},
+    "server-control": {"server": "imap.example.org\r\nx"},
+    "server-non-ascii": {"server": "imap.exämple.org"},
+    "server-edge-hyphen": {"server": "-imap.example.org"},
+    "server-too-long": {"server": ("a" * 63 + ".") * 4 + "org"},
+    "email-empty": {"email": ""},
+    "email-display-name": {"email": "Bot <bot@example.org>"},
+    "email-two": {"email": "bot@example.org,x@example.org"},
+    "email-encoded-word": {"email": "=?utf-8?q?x?=@example.org"},
+    "namespace-empty": {"namespace": ""},
+    "namespace-wildcard": {"namespace": "Bot*"},
+    "namespace-inbox": {"namespace": "inbox"},
+    "namespace-not-str": {"namespace": ["Bot"]},
+    "owner-targets-str": {"owner_targets": "Projekte"},
+    "owner-target-wildcard": {"owner_targets": ["Pro%"]},
+    "caps-missing-class": {"caps": {"per_run": _caps(5), "per_day": {"move": 0}}},
+    "caps-negative": {"caps": {"per_run": _caps(5), "per_day": {**_caps(0), "move": -1}}},
+    "caps-bool": {"caps": {"per_run": _caps(5), "per_day": {**_caps(0), "move": True}}},
+    "caps-extra-key": {"caps": {"per_run": _caps(5), "per_day": _caps(0), "x": _caps(0)}},
+    "caps-not-object": {"caps": []},
+    "keep-str": {"keep": "boss@example.org"},
+    "keep-bare-word": {"keep": ["newsletter"]},
+    "keep-not-str": {"keep": [1]},
+}
+
+
+@pytest.mark.parametrize("over", list(_V2_INVALID.values()), ids=list(_V2_INVALID))
+def test_an_invalid_v2_field_is_refused(anchor, over):
+    anchor.write(_valid(**over))
+    assert _rule(profile.load_profile) == "profile_invalid"
+
+
+@pytest.mark.parametrize("key", sorted(_valid()))
+def test_every_v2_key_is_required(anchor, key):
+    anchor.write(raw=json.dumps({k: v for k, v in _valid().items() if k != key}))
     assert _rule(profile.load_profile) == "profile_invalid"
 
 
