@@ -269,6 +269,17 @@ def test_serve_flushes_after_every_answer():
     assert Out.flushes >= 1
 
 
+def test_a_client_that_went_away_ends_serve_quietly():
+    """A closed pipe is the client's exit, not a host failure: serve returns, so the
+    host can still write its stop record."""
+
+    class Gone(io.BytesIO):
+        def write(self, data):
+            raise BrokenPipeError
+
+    _server().serve(io.BytesIO(_lines({"jsonrpc": "2.0", "id": 1, "method": "ping"})), Gone())
+
+
 def test_serve_ends_at_end_of_input():
     out = io.BytesIO()
     _server().serve(io.BytesIO(b""), out)

@@ -277,6 +277,32 @@ def test_an_offered_tool_runs_and_is_audited(install):
     assert (rec["tool"], rec["result"]) == ("search", "ok")
 
 
+def test_no_argument_value_reaches_the_audit_log_on_the_ok_path(install):
+    """From slice 3c-2 real folder names and senders arrive as arguments."""
+    _host(install, lambda args: {"found": 2}).call(
+        "search", {"since": "2026-10-01", "folder": "Geheim-Projekt"}
+    )
+    text = install.read_text(encoding="utf-8")
+    assert "Geheim-Projekt" not in text and "2026-10-01" not in text
+    assert "arguments" not in _records(install)[-1]
+
+
+def test_the_allowlist_carries_the_tickets_names_with_move_and_flag_split():
+    """#76 section 2.2 by name; move and flag are each a preview and an apply, because
+    the apply takes no UIDs. Acceptance 5b pins this list."""
+    assert host.ALLOWED_TOOLS == {
+        "create-folder",
+        "draft",
+        "flag-apply",
+        "flag-preview",
+        "move-apply",
+        "move-preview",
+        "read",
+        "search",
+        "thread",
+    }
+
+
 def test_a_tool_outside_the_allowlist_cannot_be_installed(install):
     with pytest.raises(ValueError):
         host.Host(

@@ -41,16 +41,17 @@ from .profile import ProfileRefused
 HOST_AUDIT_NAME = "host-audit.log"  # in profile.ANCHOR_DIR, provisioned by root
 SERVER_NAME = "mailbox-autopilot"
 
-# The tools the bot profile offers (section 2.2). `move` and `flag` are each a preview
-# and an apply, because the apply takes no UIDs: it gets them from the preview's token.
+# The tools the bot profile offers, by the names of section 2.2. `move` and `flag` are
+# each a preview and an apply, because the apply takes no UIDs: it gets them from the
+# preview's token (section 3d). Acceptance 5b pins this list.
 ALLOWED_TOOLS = frozenset(
     {
-        "create_folder",
+        "create-folder",
         "draft",
-        "flag_apply",
-        "flag_preview",
-        "move_apply",
-        "move_preview",
+        "flag-apply",
+        "flag-preview",
+        "move-apply",
+        "move-preview",
         "read",
         "search",
         "thread",

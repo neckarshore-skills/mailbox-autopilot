@@ -147,5 +147,8 @@ class StdioServer:
             else:
                 answer = self.handle_line(line)
             if answer is not None:
-                out.write(answer)
-                out.flush()
+                try:
+                    out.write(answer)
+                    out.flush()
+                except BrokenPipeError:
+                    return  # the client went away; that ends the session, not the host
