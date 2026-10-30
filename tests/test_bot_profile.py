@@ -195,6 +195,8 @@ _V2_INVALID = {
     "keep-str": {"keep": "boss@example.org"},
     "keep-bare-word": {"keep": ["newsletter"]},
     "keep-not-str": {"keep": [1]},
+    # an object iterates as its keys, which parse_keep would accept
+    "keep-object": {"keep": {"boss@example.org": True}},
 }
 
 
