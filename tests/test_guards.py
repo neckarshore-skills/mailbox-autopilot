@@ -489,7 +489,7 @@ def test_a_flag_plan_goes_through_the_flag_allowlist():
 
 # --- (d) caps: per run and rolling 24 hours ------------------------------------------
 
-_REAL_IS_APPEND_ONLY = getattr(g, "_is_append_only", None)
+_REAL_IS_APPEND_ONLY = g._is_append_only
 
 
 @pytest.fixture(autouse=True)
@@ -497,12 +497,12 @@ def _store_counts_as_append_only(monkeypatch):
     """Only root can set the system append-only flag, and Linux has no st_flags, so the
     cap tests stand in for it. The flag check itself runs for real in the tests that
     take `real_append_check`, and in test_only_the_system_append_only_flag_counts."""
-    monkeypatch.setattr(g, "_is_append_only", lambda st: True, raising=False)
+    monkeypatch.setattr(g, "_is_append_only", lambda st: True)
 
 
 @pytest.fixture
 def real_append_check(monkeypatch):
-    monkeypatch.setattr(g, "_is_append_only", _REAL_IS_APPEND_ONLY, raising=False)
+    monkeypatch.setattr(g, "_is_append_only", _REAL_IS_APPEND_ONLY)
 
 
 def _caps(
@@ -601,19 +601,29 @@ def test_the_store_is_provisioned_owner_only_and_records_no_values(tmp_path):
         '{"ts": 1}\n',
         '{"ts": "x", "action": "move", "count": 1, "run": "r"}\n',
         "[1]\n",
+        # a negative count would lower the 24-hour total (D15; James on #93)
+        '{"ts": 1, "action": "move", "count": -5, "run": "r"}\n',
     ],
 )
-def test_an_unreadable_store_refuses_when_the_cap_is_above_zero(tmp_path, content):
+def test_a_corrupt_store_refuses_when_the_cap_is_above_zero(tmp_path, content):
     store = tmp_path / "caps.jsonl"
     store.write_text(content)
     os.chmod(store, 0o600)
     e = _refusal(_caps(tmp_path).reserve, "move", 1)
-    assert (e.error_code, e.rule) == ("profile_refused", "cap_store_unreadable")
+    assert (e.error_code, e.rule) == ("profile_refused", "cap_store_corrupt")
 
 
 def test_a_store_in_a_missing_directory_refuses_when_the_cap_is_above_zero(tmp_path):
     caps = _caps(tmp_path, store=tmp_path / "missing" / "caps.jsonl")
-    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_unreadable"
+    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_dir_missing"
+
+
+def test_a_store_that_cannot_be_opened_is_refused(tmp_path):
+    """Not missing, but not openable either: here a directory in the store's place.
+    Each cause has its own rule, so no test passes on another cause (James on #91)."""
+    (tmp_path / "caps.jsonl").mkdir()
+    caps = _caps(tmp_path, provision=False)
+    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_unopenable"
 
 
 def test_a_symlinked_store_is_refused(tmp_path):
@@ -731,7 +741,7 @@ def test_inbox_is_case_insensitive_but_not_a_fullwidth_form():
 def test_reserve_never_creates_the_store(tmp_path):
     """Deleting the store must not reset the day (security review of 3b)."""
     caps = _caps(tmp_path, provision=False)
-    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_unreadable"
+    assert _refusal(caps.reserve, "move", 1).rule == "cap_store_missing"
     assert not (tmp_path / "caps.jsonl").exists()
 
 
@@ -739,7 +749,7 @@ def test_a_deleted_store_refuses_instead_of_starting_a_new_day(tmp_path):
     _caps(tmp_path).reserve("move", 5)
     (tmp_path / "caps.jsonl").unlink()
     later = _caps(tmp_path, run_id="run-2", provision=False)
-    assert _refusal(later.reserve, "move", 1).rule == "cap_store_unreadable"
+    assert _refusal(later.reserve, "move", 1).rule == "cap_store_missing"
 
 
 def test_provision_refuses_an_existing_store(tmp_path):

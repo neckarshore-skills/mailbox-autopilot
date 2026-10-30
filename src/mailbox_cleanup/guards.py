@@ -553,7 +553,7 @@ class CapLedger:
         try:
             parent = self._store.parent.resolve(strict=True)
         except OSError:
-            raise _refuse("cap_store_unreadable", "the cap store's directory is missing") from None
+            raise _refuse("cap_store_dir_missing", "the cap store's directory is missing") from None
         if not _trusted_dir(parent):
             raise _refuse(
                 "cap_store_dir_untrusted", "a directory above the cap store is not trusted"
@@ -563,7 +563,9 @@ class CapLedger:
         except OSError as e:
             if e.errno == errno.ELOOP:
                 raise _refuse("cap_store_symlink", "the cap store is a symlink") from None
-            raise _refuse("cap_store_unreadable", "the cap store cannot be opened") from None
+            if e.errno == errno.ENOENT:
+                raise _refuse("cap_store_missing", "the cap store does not exist") from None
+            raise _refuse("cap_store_unopenable", "the cap store cannot be opened") from None
         st = os.fstat(fd)
         if (
             not stat.S_ISREG(st.st_mode)
@@ -591,12 +593,17 @@ class CapLedger:
             for line in b"".join(chunks).decode("utf-8").splitlines():
                 r = json.loads(line)
                 ts, cls, n = r["ts"], r["action"], r["count"]
-                if type(ts) not in (int, float) or type(n) is not int or cls not in ACTION_CLASSES:
+                if (
+                    type(ts) not in (int, float)
+                    or type(n) is not int
+                    or n < 1
+                    or cls not in ACTION_CLASSES
+                ):
                     raise ValueError("bad record")
                 if cls == action and ts > now - DAY_SECONDS:  # a future entry counts too
                     total += n
         except (ValueError, KeyError, TypeError, UnicodeDecodeError):
-            raise _refuse("cap_store_unreadable", "the cap store is corrupt") from None
+            raise _refuse("cap_store_corrupt", "the cap store is corrupt") from None
         return total
 
 
