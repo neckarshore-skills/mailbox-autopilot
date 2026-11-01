@@ -24,6 +24,8 @@ dev = [
 [project.scripts]
 mailbox-autopilot = "mailbox_cleanup.cli:cli"
 mailbox-cleanup = "mailbox_cleanup.cli:cli"
+# the bot's MCP host (#76); it serves only the bot user, never the owner
+mailbox-autopilot-host = "mailbox_cleanup.host:main"
 
 [build-system]
 # exact, with its dependencies under [tool.uv]: uv builds this project outside the lock
