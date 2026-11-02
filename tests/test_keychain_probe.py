@@ -7,6 +7,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,30 @@ def test_every_command_of_the_run_sheet_exists():
     used = set(re.findall(r"probe\.sh ([a-z0-9-]+)", sheet))
     assert {"setup", "arm3", "arm4b", "status", "cleanup"} <= used
     assert used <= _script_commands()
+
+
+def test_the_printed_command_runs_for_the_throwaway_user_only(tmp_path):
+    """James's third read of #97, T1: it is printed into the owner's own terminal, and without
+    a keychain argument it writes to the default keychain of whoever runs it. The check runs
+    in a real shell here, as somebody who is not `mbxprobe`, with `id` on the path and no
+    `security`, so a line that got past the check would fail and print nothing of use."""
+    (tmp_path / "id").symlink_to(shutil.which("id"))
+    script = (PROBE / "probe.sh").read_text(encoding="utf-8")
+    line = re.search(r"^  printf '(\[ .*)\\n' \\$", script, re.M).group(1)
+    r = subprocess.run(
+        ["/bin/bash", "-c", line.replace("%s", "/nonexistent/python")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": str(tmp_path)},
+    )
+    assert "NOT DONE" in r.stdout and "not found" not in r.stderr
+
+
+def test_the_sheet_checks_the_owners_keychain_and_bans_writes_there():
+    sheet = (ROOT / "docs/2026-11-02-keychain-probe-runsheet.md").read_text(encoding="utf-8")
+    assert "security find-generic-password -s mailbox-cleanup-probe" in sheet
+    assert "No `security` write as `german`" in sheet
 
 
 def test_the_output_directory_is_not_open_to_everyone():
@@ -427,7 +452,14 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
         json.dumps({"arm": "arm4", "mode": "drop", "read": {"value_equals_canary": True}}) + "\n",
         encoding="utf-8",
     )
-    r = walk("arm4-read", "arm4b", "arm5-reset", "arm5-read", "report", WALK_READS=reads)
+    r = walk("arm4-read", "arm4b", WALK_READS=reads)
+    assert r.returncode == 0, r.stderr
+    r = walk("arm5-reset")
+    assert r.returncode == 0, r.stderr
+    printed = next(x for x in r.stdout.splitlines() if "add-generic-password" in x)
+    assert printed.startswith('[ "$(id -un)" = mbxprobe ] && security add-generic-password ')
+    assert printed.endswith('|| echo "NOT DONE: wrong user, or the add failed"')
+    r = walk("arm5-read", "report", WALK_READS=reads)
     assert r.returncode == 0, r.stderr
     assert "arm5/username" in r.stdout or '"arm5"' in r.stdout
     arms = [a[a.index("--arm") + 1] for a in walk.jobs()]
@@ -471,7 +503,7 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
 def test_no_half_of_arm_3_stops_the_run_with_the_right_reason(walk):
     r = walk("setup", "arm3")
     assert r.returncode == 2 and "no half of arm 3 read the canary" in r.stderr
-    for arm in ("arm6", "arm7", "arm4-install"):
+    for arm in ("arm6", "arm7", "arm4-install", "arm4b"):
         r = walk(arm)
         assert r.returncode == 2 and "no half of arm 3 read the canary" in r.stderr
 

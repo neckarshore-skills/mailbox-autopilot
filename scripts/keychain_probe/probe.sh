@@ -204,6 +204,7 @@ cmd_arm4_read() {
 
 cmd_arm4b() { # the state of the 14 runs a day: the owner logged in, the bot not
   [ "$(stat -f %Su /dev/console)" != "root" ] || die "nobody is at the console yet; wait and retry"
+  proven_partition >/dev/null
   run_job arm4b drop unlock-read
 }
 
@@ -213,7 +214,9 @@ cmd_arm5_reset() {
   say "the one GUI login: user Keychain Probe. Do not paste the next line to anyone:"
   say "password $(cat "$LOGIN_SECRET")"
   say "then this line in that user's Terminal, then log out:"
-  printf 'security add-generic-password -s mailbox-cleanup-probe -a probe@example.invalid -w CANARY -T %s\n' \
+  # The identity check is what holds: this is printed into the owner's own terminal, and a
+  # keychain path would be no guard, because a missing one falls back to the default.
+  printf '[ "$(id -un)" = mbxprobe ] && security add-generic-password -s mailbox-cleanup-probe -a probe@example.invalid -w CANARY -T %s || echo "NOT DONE: wrong user, or the add failed"\n' \
     "$("$PY" -c 'import os,sys; print(os.path.realpath(sys.executable))')"
 }
 

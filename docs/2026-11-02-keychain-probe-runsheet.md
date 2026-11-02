@@ -54,6 +54,8 @@ Expected: `no user, group, directory, daemon or report of the probe is left`.
 
 Run the steps top to bottom. Each prints one line per arm. Paste those lines to Obi, **except the password line of step 11**.
 
+**No `security` write as `german` on this Mac, for diagnosis either.** A write without a keychain lands in his login keychain, and with a path that does not exist it lands there too, without a word. That happened once while this probe was built.
+
 | # | Step | Command | Expected |
 |---|------|---------|----------|
 | 1 | Set up, about 3 minutes | `sudo ./probe.sh setup` | Ends with `done. Next: arm1` |
@@ -67,13 +69,14 @@ Run the steps top to bottom. Each prints one line per arm. Paste those lines to 
 | 9 | Arm 4: the job at boot | `sudo ./probe.sh arm4-read` | `CANARY READ`. The console user shows who won the race against auto-login |
 | 10 | Arm 4b: the state of the 14 runs a day. Wait until `german` is logged in | `sudo ./probe.sh arm4b` | `CANARY READ`, console `german` |
 | 11 | Arm 5, before the GUI login | `sudo ./probe.sh arm5-reset` | Prints the password and one command. Do not paste the password line |
-| 12 | One GUI login as **Keychain Probe**, at the machine or by Screen Sharing, before 02:00. `german` is logged in by auto-login, so use Fast User Switching in Control Center, which keeps his session running. If it is off, log `german` out; step 13 brings him back, and his session, the backup included, stops until then. Skip every assistant screen, run the printed command in that user's Terminal, and log out | By hand | Terminal returns without an error |
+| 12 | One GUI login as **Keychain Probe**, at the machine or by Screen Sharing, before 02:00. `german` is logged in by auto-login, so use Fast User Switching in Control Center, which keeps his session running. If it is off, log `german` out; step 13 brings him back, and his session, the backup included, stops until then. Skip every assistant screen, run the printed command in **that user's** Terminal, and log out | By hand | Terminal prints nothing. `NOT DONE` means the wrong user or a failed add: stop and tell Obi |
 | 13 | Backup check, then reboot | As in step 8 | `not running`. Back in about 2 minutes |
 | 14 | Arm 5: after one login | `sudo ./probe.sh arm5-read` | `no canary`, locked |
 | 15 | Backup proof, as `german`, no `sudo`. It must stay `kickstart`: the backup script started directly in an SSH session fails on the Keychain, which would be a false alarm. Whether `kickstart` works over SSH is unmeasured; if it refuses, do this step at the machine. How long a run takes is unmeasured too; wait for it | `launchctl kickstart gui/501/<label>`, then read `<status file>` | Exit 0, with today's time |
 | 16 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job. Obi takes it |
 | 17 | Clean up | `sudo ./probe.sh cleanup` | Exits 1 and names the report, because it is still there |
 | 18 | After Obi has the report | `sudo rm /Users/Shared/keychain-probe-report.jsonl`, then `sudo ./probe.sh status`, then `cd ~ && rm -r keychain-probe` | The closing line of `status`. A remaining background task record is named instead, see "What stays" |
+| 19 | In `german`'s own Terminal, no `sudo`. It only looks and prints no value | `security find-generic-password -s mailbox-cleanup-probe`, then `echo $?` | `44`: no canary in his keychain. Anything else: tell Obi, and delete nothing |
 
 **Stop rules, both enforced by the script.** If no half of arm 3 reads the canary, arms 4, 6 and 7 refuse to run, because they mean something only with the partition arm 3 proved. A `prepare` that fails stops the run at once. In both cases do not reboot. Tell Obi, then run `cleanup`.
 
