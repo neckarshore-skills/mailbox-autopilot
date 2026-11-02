@@ -33,7 +33,7 @@ cd ~/keychain-probe
 sudo ./probe.sh status
 ```
 
-Expected: `nothing of the probe is on this machine`.
+Expected: `no user, group, directory or daemon of the probe is left`.
 
 ## The sitting
 
@@ -51,11 +51,11 @@ Run the steps top to bottom. Each prints one line per arm; paste those lines to 
 | 8 | Reboot | `sudo shutdown -r now` | Back in about 2 minutes |
 | 9 | Arm 4: at boot | `sudo ./probe.sh arm4-read` | `CANARY READ`, `facts.boottime` is the new boot |
 | 10 | Arm 5, before the GUI login | `sudo ./probe.sh arm5-reset` | Prints the password and one command |
-| 11 | One GUI login as **Keychain Probe**: at the machine, or by Screen Sharing. Skip every assistant screen. In that user's Terminal, run the printed command. Log out | By hand | Terminal returns without an error |
+| 11 | One GUI login as **Keychain Probe**, at the machine or by Screen Sharing. `german` is logged in by auto-login, so use Fast User Switching in Control Center, which keeps his session running. If it is off, log `german` out; step 12 brings him back, and what runs in his session stops until then. Skip every assistant screen, run the printed command in that user's Terminal, and log out | By hand | Terminal returns without an error |
 | 12 | Reboot | `sudo shutdown -r now` | Back in about 2 minutes |
 | 13 | Arm 5: after one login | `sudo ./probe.sh arm5-read` | `no canary`, locked |
 | 14 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job |
-| 15 | Clean up | `sudo ./probe.sh cleanup` | `nothing of the probe is on this machine` |
+| 15 | Clean up, then remove the copy | `sudo ./probe.sh cleanup && cd ~ && rm -r keychain-probe` | `no user, group, directory or daemon of the probe is left` |
 
 After each reboot, check that the services of this machine came back, as you would after any restart.
 
@@ -70,4 +70,4 @@ After each reboot, check that the services of this machine came back, as you wou
 
 **Two things this cannot show.** "Nobody logged in" in James's table is not this machine's state: `german` logs in by himself after each reboot, and the sheet leaves that as it is, because that is how the target Mac runs. The partition list in `arm3b` is Obi's addition, not James's, because `add-generic-password` writes only Apple's partitions; `facts.codesign` shows what signs the interpreter.
 
-If a step stops with an error, do not retry it. `sudo ./probe.sh cleanup` always returns the machine to the state before step 1.
+If a step stops with an error, do not retry it. `sudo ./probe.sh cleanup` removes what the steps created. Its report and your copy of the script stay until you remove them.

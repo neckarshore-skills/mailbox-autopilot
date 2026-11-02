@@ -203,7 +203,7 @@ cmd_status() {
   if [ -e "$DIR" ]; then say "$DIR exists"; bad=1; fi
   if [ -e "$PLIST" ]; then say "$PLIST exists"; bad=1; fi
   if [ -e "/Users/$USER_NAME" ]; then say "/Users/$USER_NAME exists"; bad=1; fi
-  if [ "$bad" = 0 ]; then say "nothing of the probe is on this machine"; fi
+  if [ "$bad" = 0 ]; then say "no user, group, directory or daemon of the probe is left"; fi
 }
 
 cmd_cleanup() {
