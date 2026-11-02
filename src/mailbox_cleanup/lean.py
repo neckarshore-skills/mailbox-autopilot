@@ -86,6 +86,11 @@ def normal_domain(value: str) -> str | None:
     return ace if len(ace) <= 253 and _DOMAIN_RE.fullmatch(ace) else None
 
 
+def _ascii_address(address: str) -> str:
+    local, _, domain = address.rpartition("@")
+    return f"{local}@{normal_domain(domain) or domain}"
+
+
 def _sender(msg: Message) -> str | None:
     """The one address of the one From header, its domain normalised, or None. Stays in
     the process: the keep list needs the local part, and the model never gets it."""
@@ -158,7 +163,11 @@ class Lean:
     def __init__(
         self, *, keep: Iterable[str], authserv_id: str | None, suppress: Iterable[str] = ()
     ):
-        self._keep = parse_keep(keep)
+        addrs, domains = parse_keep(keep)  # compared with a sender, so in the sender's form
+        self._keep = (
+            frozenset(_ascii_address(a) for a in addrs),
+            frozenset(normal_domain(d) or d for d in domains),
+        )
         self._authserv_id = authserv_id
         self._suppress = tuple(suppress)
 
@@ -232,19 +241,20 @@ class Lean:
         return [r for r in records if r is not None]
 
     def search(self, mb, criteria: str, limit: int) -> tuple[list[dict], bool]:
-        """The newest `limit` records by UID, and whether more UIDs are left.
+        """The newest `limit` records by UID, and whether there is more to return.
 
-        The page fills from further back when a mail is suppressed: rows cut after the
-        limit would show a short page with `truncated`, and that pair says a listed mail
-        exists. The look back stops after SEARCH_SCAN_MAX UIDs."""
+        Both parts of the answer count returned records, never UIDs, so neither can give a
+        suppressed mail away: the page fills from further back, and `truncated` needs one
+        record past the page, not one UID. The look back stops after SEARCH_SCAN_MAX UIDs,
+        and only then does `truncated` mean that some were not looked at."""
         found = sorted(_uid_list(_uid_cmd(mb, "SEARCH", criteria)), key=int, reverse=True)
         rows: list[dict] = []
         scanned = 0
-        while len(rows) < limit and scanned < min(len(found), SEARCH_SCAN_MAX):
-            batch = found[scanned : scanned + limit - len(rows)]
+        while len(rows) <= limit and scanned < min(len(found), SEARCH_SCAN_MAX):
+            batch = found[scanned : scanned + limit + 1 - len(rows)]
             rows += self.rows(mb, batch)
             scanned += len(batch)
-        return rows, scanned < len(found)
+        return rows[:limit], len(rows) > limit or scanned < len(found)
 
 
 # --- search ----------------------------------------------------------------------------

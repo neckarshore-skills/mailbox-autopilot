@@ -7,6 +7,7 @@ for the INBOX (owner decisions 2026-11-02, #76), and no real mail reaches any of
 """
 
 import io
+import itertools
 import json
 import os
 import subprocess
@@ -716,6 +717,25 @@ def test_a_suppressed_mail_does_not_shorten_a_page(clinic):
     assert (payload["count"], payload["truncated"]) == (2, False)
 
 
+@pytest.mark.parametrize(
+    "hidden",
+    [c for n in (1, 2, 3) for c in itertools.combinations(range(1, 6), n)],
+    ids=str,
+)
+@pytest.mark.parametrize("limit", [1, 2, 3, 4, 6])
+def test_a_search_cannot_tell_a_listed_mail_from_no_mail(clinic, hidden, limit):
+    """Wherever the listed mails sit and wherever the page ends, the whole answer equals
+    the answer without them, `truncated` included. Found by review: a listed mail older
+    than the page end used to set `truncated` on its own."""
+    mails = {u: Mail(b"From: a%d@sender.example\r\n" % u) for u in range(1, 6)}
+    mails.update({u: Mail(b"From: arzt@klinik.example\r\n") for u in hidden})
+    clinic.folders["INBOX"] = mails
+    with_them = _ok("search", {"limit": limit})
+    for u in hidden:
+        del mails[u]
+    assert with_them == _ok("search", {"limit": limit})
+
+
 def test_a_folder_full_of_listed_mail_is_scanned_only_so_far(clinic, monkeypatch):
     monkeypatch.setattr(lean, "SEARCH_SCAN_MAX", 2)
     payload = _ok("search", {"limit": 1})
@@ -732,6 +752,19 @@ def test_an_internationalised_listed_domain_matches_its_mail(clinic):
     _write_profile(suppress=["bücher.example"])
     clinic.folders["INBOX"] = {1: Mail("From: a@bücher.example\r\n".encode())}
     assert _ok("search")["count"] == 0
+
+
+def test_an_internationalised_keep_entry_matches_its_mail(imap):
+    """The sender is compared in punycode, so the keep list must be too."""
+    _write_profile(keep=["@bücher.example", "chef@bücher.example"])
+    imap.folders["INBOX"] = {
+        1: Mail("From: a@bücher.example\r\n".encode()),
+        2: Mail(b"From: a@xn--bcher-kva.example\r\n"),
+    }
+    assert [m["keep_hit"] for m in _ok("search")["messages"]] == [True, True]
+    _write_profile(keep=["chef@bücher.example"])
+    imap.folders["INBOX"] = {1: Mail("From: chef@bücher.example\r\n".encode())}
+    assert _ok("search")["messages"][0]["keep_hit"] is True
 
 
 def test_a_lookalike_of_a_listed_domain_is_not_listed(clinic):
