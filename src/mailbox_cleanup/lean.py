@@ -63,6 +63,10 @@ MAX_HEADER = 8192  # a longer value than this is no sender and no verdict
 SEARCH_SCAN_MAX = 1000  # UIDs one search looks through to fill its page
 INVALID_SENDER = "invalid"  # no host name has one label, so this cannot be a domain
 SUFFIX_FILE = "public_suffix.dat"  # package data, root-owned with the package (L3)
+MIN_SUFFIX_RULES = 1000  # a shorter file is a broken one: every domain would be cut wrong
+# Python's IDNA 2003 maps these away, so `straße.de` would read `strasse.de`, another
+# registration. A domain holding one is no domain here, and a list entry is refused.
+IDNA_2003_CHANGES = frozenset("ßẞς\u200c\u200d")
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _LABEL = r"(?!-)[a-z0-9-]{1,63}(?<!-)"
@@ -83,9 +87,10 @@ def normal_domain(value: str) -> str | None:
     """Lower-case ASCII with punycode for anything else, so a lookalike in another script
     shows as what it is; None unless the result is a plain host name. The last label must
     hold a letter, so a numeric host such as an IP address is none (no IP leaves the host).
-
-    This is Python's IDNA 2003 codec: it maps `ß` to `ss`. A sender's domain can only be
-    misread into a neighbour by that; a list entry is refused in `profile` instead."""
+    A value this codec would turn into another domain is none too, so a record never names
+    a neighbour (IDNA_2003_CHANGES)."""
+    if IDNA_2003_CHANGES & set(value):
+        return None
     try:
         ace = value.encode("idna").decode("ascii").lower()
     except UnicodeError:
@@ -97,10 +102,16 @@ def normal_domain(value: str) -> str | None:
 
 @functools.lru_cache(maxsize=1)
 def load_suffix_rules() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-    """The vendored Public Suffix List: plain rules, wildcard parents, exceptions. The host
-    reads a file that came with the package and goes to no network. It ages, and a suffix
-    it does not know yet costs digest quality only, so it is bumped with a release."""
-    text = resources.files(__package__).joinpath(SUFFIX_FILE).read_text(encoding="ascii")
+    """The vendored Public Suffix List. The host reads a file that came with the package
+    and goes to no network. It ages, which costs digest quality only: suppression and the
+    keep hit never read it. It is bumped by hand, in a reviewed PR, with each release."""
+    return parse_suffix_rules(
+        resources.files(__package__).joinpath(SUFFIX_FILE).read_text(encoding="ascii")
+    )
+
+
+def parse_suffix_rules(text: str) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Plain rules, wildcard parents and exceptions, or ValueError for a broken file."""
     plain, wild, exceptions = set(), set(), set()
     for line in text.splitlines():
         if line.startswith("!"):
@@ -109,15 +120,19 @@ def load_suffix_rules() -> tuple[frozenset[str], frozenset[str], frozenset[str]]
             wild.add(line[2:])
         elif line and not line.startswith("//"):
             plain.add(line)
+    if len(plain) < MIN_SUFFIX_RULES:
+        raise ValueError("the suffix list is too short")
     return frozenset(plain), frozenset(wild), frozenset(exceptions)
 
 
 def registrable_domain(domain: str) -> str:
     """The registrable domain of a normalised domain, by the Public Suffix List algorithm:
     the longest matching rule, an exception first, and otherwise the last label is the
-    suffix. Everything left of it goes, so one label of what a sender wrote reaches the
-    model, and not a tenant's or a person's name in a subdomain. The input of a domain
-    that is itself a suffix comes back as it is."""
+    suffix. Everything left of it goes, so a tenant's or a person's name in a subdomain
+    does not reach the model. What stays is usually one label a sender chose, and two
+    under a TLD the list does not know or a wildcard rule. A domain that is itself a suffix
+    comes back as it is. Nothing may act on the result as an identity: anything that
+    decides uses the full domain inside the host."""
     plain, wild, exceptions = load_suffix_rules()
     labels = domain.split(".")
     suffix = 1
@@ -135,9 +150,13 @@ def registrable_domain(domain: str) -> str:
 def _forms(domain: str) -> set[str]:
     """A listed domain as it can stand in a raw From: its ASCII and its Unicode form."""
     try:
-        return {domain, domain.encode("ascii").decode("idna")}
+        labels = [
+            label[4:].encode("ascii").decode("punycode") if label.startswith("xn--") else label
+            for label in domain.split(".")
+        ]
     except UnicodeError:
         return {domain}
+    return {domain, ".".join(labels)}
 
 
 def _ascii_address(address: str) -> str:

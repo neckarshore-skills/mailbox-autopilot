@@ -213,10 +213,12 @@ _V2_INVALID = {
     "suppress-wildcard": {"suppress": ["*.klinik.example"]},
     "suppress-numeric": {"suppress": ["192.168.1.1"]},
     "suppress-eszett": {"suppress": ["straße.de"]},
+    "suppress-capital-eszett": {"suppress": ["Straẞe.de"]},
     "suppress-final-sigma": {"suppress": ["ς.example"]},
     "suppress-zwj": {"suppress": ["a\u200db.example"]},
     "suppress-zwnj": {"suppress": ["a\u200cb.example"]},
     "keep-eszett": {"keep": ["@straße.de"]},
+    "keep-capital-eszett": {"keep": ["@Straẞe.de"]},
 }
 
 

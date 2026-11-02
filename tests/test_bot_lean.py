@@ -631,6 +631,29 @@ def test_a_tenant_name_under_a_private_suffix_does_not_survive():
     assert lean.registrable_domain("max-mustermann.github.io") == "github.io"
 
 
+@pytest.mark.parametrize(
+    "text", ["", "// only a comment\n", "com\nnet\n"], ids=["empty", "comment", "truncated"]
+)
+def test_a_suffix_file_that_is_too_short_is_refused(text):
+    """James's re-read of #96, N3: an empty file would cut every domain to its last two
+    labels, and `a.example.co.uk` would read `co.uk`."""
+    with pytest.raises(ValueError):
+        lean.parse_suffix_rules(text)
+
+
+def test_the_shipped_suffix_file_passes_its_own_floor():
+    assert len(lean.load_suffix_rules()[0]) > lean.MIN_SUFFIX_RULES
+
+
+def test_a_host_with_a_broken_suffix_list_does_not_serve(imap, install, monkeypatch):
+    def broken():
+        return lean.parse_suffix_rules("")
+
+    monkeypatch.setattr(lean, "load_suffix_rules", broken)
+    assert _serve()[0] == 6
+    assert _records(install)[-1]["rule"] == "suffix_list_unavailable"
+
+
 def test_a_host_without_the_suffix_list_does_not_serve(imap, install, monkeypatch, capsys):
     def gone():
         raise FileNotFoundError("public_suffix.dat")
@@ -849,6 +872,40 @@ def test_an_unreadable_from_naming_a_listed_unicode_domain_returns_nothing(clini
         2: Mail(b"From: Laden, Berlin <a@xn--bcher-kva.example>\r\n"),
     }
     assert _ok("search")["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "from_line",
+    [
+        "From: Praxis <a@xn--strae-oqa.de>\r\n",
+        "From: Praxis <a@straße.de>\r\n",
+        "From: a@sub.straße.de\r\n",
+        "From: Praxis, Berlin <a@straße.de>\r\n",
+    ],
+    ids=["ascii", "unicode", "subdomain", "unreadable"],
+)
+def test_a_listed_eszett_domain_returns_nothing_however_the_mail_writes_it(clinic, from_line):
+    """James's re-read of #96, N1: the codec would read `straße.de` as `strasse.de`, another
+    registration, so the record would name a neighbour."""
+    _write_profile(suppress=["xn--strae-oqa.de"])
+    clinic.folders["INBOX"] = {1: Mail(from_line.encode())}
+    assert _ok("search")["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "value, domain",
+    [
+        ("a@straße.de".encode(), "invalid"),
+        ("a@ς.example".encode(), "invalid"),
+        ("a@a\u200db.example".encode(), "invalid"),
+        (b"a@strasse.de", "strasse.de"),
+    ],
+    ids=["eszett", "final-sigma", "zwj", "the-real-neighbour"],
+)
+def test_a_domain_the_codec_would_change_is_no_domain(imap, value, domain):
+    """A record must not name another registration than the one in the mail."""
+    imap.folders["INBOX"] = {1: Mail(b"From: " + value + b"\r\n")}
+    assert _ok("read", {"uid": "1"})["messages"][0]["sender_domain"] == domain
 
 
 def test_an_unreadable_from_of_anybody_else_stays_visible(clinic):
