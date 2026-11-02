@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,7 +49,9 @@ SYSTEM_ADDRESS_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost)\b")
+# Unicode word characters: an ASCII class matches nothing in an address with an umlaut in its
+# domain, and this repository's subject is German mail (James on #96, T1).
+EMAIL_RE = re.compile(r"[\w.%+-]+@((?:(?:[^\W_]|-)+\.)+[^\W\d_]{2,}|localhost)\b")
 IBAN_RE = re.compile(r"\b([A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?)\b")
 PHONE_RE = re.compile(
     r"(?<![\w.])(?:\+|00)\d{1,3}"  # + or 00, country code
@@ -320,7 +323,7 @@ def _allowed(path: str, text: str, allow: list[AllowEntry]) -> bool:
 
 
 def _email_allowed(domain: str) -> bool:
-    d = domain.lower()
+    d = unicodedata.normalize("NFKC", domain).casefold()
     return any(d == a or d.endswith("." + a) for a in ALLOWED_EMAIL_DOMAINS)
 
 
