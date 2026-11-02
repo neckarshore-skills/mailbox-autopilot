@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sys
 from collections.abc import Mapping
@@ -82,6 +83,15 @@ EXCLUDED_TOOLS = frozenset(
     }
 )
 KNOWN_NAMES = ALLOWED_TOOLS | DEFERRED_TOOLS | EXCLUDED_TOOLS
+# What a record may say. `rule`, `action`, `result` and `error_code` are program constants
+# by contract; this holds the contract, so one formatted rule cannot put a folder name
+# into a log that promises to carry no value (James on #94, finding 2).
+_TOKEN_RE = re.compile(r"[a-z0-9_]{1,64}", re.ASCII)
+_CLASS_RE = re.compile(r"[A-Za-z0-9_]{1,64}", re.ASCII)
+
+
+def _shaped(value, shape: re.Pattern) -> str:
+    return value if type(value) is str and shape.fullmatch(value) else "unknown"
 
 
 def _refusal(rule: str, message: str) -> GuardRefused:
@@ -130,7 +140,9 @@ class HostAudit:
 
 
 def _result(payload: dict, *, error: bool) -> dict:
-    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    text = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True
+    )
     return {"content": [{"type": "text", "text": text}], "isError": error}
 
 
@@ -153,8 +165,11 @@ class Host:
     def list_tools(self) -> list[dict]:
         return [self.tools[n].spec for n in sorted(self.tools)]
 
-    def _record(self, name, **fields) -> None:
+    def _record(self, name, *, exception=None, **tokens) -> None:
         known = name if type(name) is str and name in KNOWN_NAMES else "unknown"
+        fields = {k: _shaped(v, _TOKEN_RE) for k, v in tokens.items()}
+        if exception is not None:
+            fields["exception"] = _shaped(exception, _CLASS_RE)
         self.audit.write(event="call", tool=known, **fields)
 
     def _refused(self, name, e: GuardRefused) -> dict:
@@ -175,13 +190,17 @@ class Host:
         if not isinstance(arguments, dict):
             return self._refused(name, _refusal("arguments_invalid", "arguments must be an object"))
         try:
-            payload = tool.run(arguments)
+            # built before the record: an ok line means a result exists (James on #94)
+            result = _result(tool.run(arguments), error=False)
         except GuardRefused as e:
             return self._refused(name, e)
         except Exception as e:
             try:
                 self._record(
-                    name, result="error", error_code="operation_error", rule=type(e).__name__
+                    name,
+                    result="error",
+                    error_code="operation_error",
+                    exception=type(e).__name__,
                 )
             except GuardRefused:
                 pass
@@ -192,7 +211,7 @@ class Host:
             self._record(name, result="ok")
         except GuardRefused as e:
             return _error_result(e)  # no record, no data
-        return _result(payload, error=False)
+        return result
 
 
 def build_tools(p) -> dict:
