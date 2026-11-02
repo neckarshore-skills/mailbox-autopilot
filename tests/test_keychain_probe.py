@@ -430,6 +430,31 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
     r = walk("arm4-read", "arm4b", "arm5-reset", "arm5-read", "report", WALK_READS=reads)
     assert r.returncode == 0, r.stderr
     assert "arm5/username" in r.stdout or '"arm5"' in r.stdout
+    arms = [a[a.index("--arm") + 1] for a in walk.jobs()]
+    assert arms == [
+        "arm1",
+        "arm1",
+        "arm2-prepare",
+        "arm2",
+        "arm2",
+        "arm3a-prepare",
+        "arm3a",
+        "arm3b-prepare",
+        "arm3b",
+        "arm3c-prepare",
+        "arm3c",
+        "arm6a-prepare",
+        "arm6a",
+        "arm6b-prepare",
+        "arm6b",
+        "arm7-prepare",
+        "arm7",
+        "arm4-prepare",
+        "arm4b",
+        "arm5-reset",
+        "arm5",
+        "arm5",
+    ]
     prepared = [a for a in walk.jobs() if "prepare" in a]
     later = [a for a in prepared if a[a.index("--arm") + 1].startswith(("arm4", "arm6", "arm7"))]
     assert later and all(a[a.index("--partition") + 1] == "unsigned" for a in later)
