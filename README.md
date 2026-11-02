@@ -365,7 +365,7 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 8 | A failing check refuses; it never lets through | `cli._ProfileGuardedGroup.main` | `test_a_failing_gate_refuses_rather_than_lets_through` |
 | 9 | Without an installed profile and group, the CLI is unchanged, and a broken profile does not lock a non-member out | `profile.cli_gate` | `test_without_an_installed_profile_the_cli_is_unchanged`, `test_a_broken_profile_does_not_lock_out_a_non_member` |
 
-**The guard library (slice 3b, #91).** These rows hold in `src/mailbox_cleanup/guards.py`. They bind the bot once the MCP host calls them before every side effect (slice 3c); until then nothing calls them.
+**The guard library (slice 3b, #91).** These rows hold in `src/mailbox_cleanup/guards.py`. **Not active in release 1:** release 1 is a read-only bot, so nothing calls rows 11 to 20 yet. They bind the bot once a later stage offers a write tool. Row 10 binds `read` today.
 
 | # | Guarantee | Code | Test (`tests/test_guards.py`) |
 |---|---|---|---|

@@ -41,10 +41,14 @@ from .profile import ProfileRefused
 HOST_AUDIT_NAME = "host-audit.log"  # in profile.ANCHOR_DIR, provisioned by root
 SERVER_NAME = "mailbox-autopilot"
 
-# The tools the bot profile offers, by the names of section 2.2. `move` and `flag` are
-# each a preview and an apply, because the apply takes no UIDs: it gets them from the
-# preview's token (section 3d). Acceptance 5b pins this list.
-ALLOWED_TOOLS = frozenset(
+# What release 1 offers: a read-only bot, INBOX only (owner decision 2026-11-02 on #76).
+# Acceptance 5b pins this list, and the launcher pins the same names (L8), so widening it
+# takes two keys.
+ALLOWED_TOOLS = frozenset({"read", "search"})
+# The later stage, by the names of section 2.2. `move` and `flag` are each a preview and an
+# apply, because the apply takes no UIDs. Refused like everything else until a later PR
+# moves a name up, and recorded under its own name.
+DEFERRED_TOOLS = frozenset(
     {
         "create-folder",
         "draft",
@@ -52,8 +56,6 @@ ALLOWED_TOOLS = frozenset(
         "flag-preview",
         "move-apply",
         "move-preview",
-        "read",
-        "search",
         "thread",
     }
 )
@@ -79,7 +81,7 @@ EXCLUDED_TOOLS = frozenset(
         "unsubscribe",
     }
 )
-KNOWN_NAMES = ALLOWED_TOOLS | EXCLUDED_TOOLS
+KNOWN_NAMES = ALLOWED_TOOLS | DEFERRED_TOOLS | EXCLUDED_TOOLS
 
 
 def _refusal(rule: str, message: str) -> GuardRefused:

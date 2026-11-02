@@ -287,20 +287,34 @@ def test_no_argument_value_reaches_the_audit_log_on_the_ok_path(install):
     assert "arguments" not in _records(install)[-1]
 
 
-def test_the_allowlist_carries_the_tickets_names_with_move_and_flag_split():
-    """#76 section 2.2 by name; move and flag are each a preview and an apply, because
-    the apply takes no UIDs. Acceptance 5b pins this list."""
-    assert host.ALLOWED_TOOLS == {
+def test_the_allowlist_is_release_1_a_read_only_bot():
+    """Owner decision 2026-11-02 on #76. Acceptance 5b pins this list."""
+    assert host.ALLOWED_TOOLS == {"read", "search"}
+
+
+def test_every_later_stage_name_is_refused_under_its_own_name(install):
+    names = sorted(host.DEFERRED_TOOLS)
+    assert names == [
         "create-folder",
         "draft",
         "flag-apply",
         "flag-preview",
         "move-apply",
         "move-preview",
-        "read",
-        "search",
         "thread",
-    }
+    ]
+    _, answers = _serve(*(_call(n, id=10 + i) for i, n in enumerate(names)))
+    assert {_payload(a)["rule"] for i, a in answers.items() if i >= 10} == {"tool_not_allowed"}
+    calls = [r for r in _records(install) if r["event"] == "call"]
+    assert [r["tool"] for r in calls] == names
+
+
+@pytest.mark.parametrize("name", sorted(host.DEFERRED_TOOLS))
+def test_a_later_stage_tool_cannot_be_installed(install, name):
+    with pytest.raises(ValueError):
+        host.Host(
+            profile=profile.load_profile(), audit=_audit(install), tools={name: FakeTool(dict)}
+        )
 
 
 def test_a_tool_outside_the_allowlist_cannot_be_installed(install):
