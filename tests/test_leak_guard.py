@@ -68,6 +68,43 @@ def test_a_reserved_domain_passes_in_every_script(address):
     assert _scan(f"x = '{address}'\n") == []
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "kim@bu\u0308cher-owner.test",  # NFD: U+0308 is a combining mark, not a word character
+        "kim\uff20bücher-owner.test",  # a fullwidth @
+        "kim@bücher-owner\uff0etest",  # a fullwidth dot
+    ],
+    ids=["nfd", "fullwidth-at", "fullwidth-dot"],
+)
+def test_a_decomposed_or_fullwidth_address_hits(address):
+    """James on #98, U1: the same address, in forms the raw line hides from the pattern."""
+    hits = _scan(f"x = '{address}'\n")
+    assert [(h.line, h.kind, h.label) for h in hits] == [(1, "public", "email")]
+
+
+@pytest.mark.parametrize(
+    "local, domain",
+    [
+        ("new\u017fletter", "linkedin.com"),  # long s
+        ("not\u0131fications", "github.com"),  # dotless i
+        ("newsletter", "lin\u212aedin.com"),  # Kelvin sign
+    ],
+    ids=["long-s", "dotless-i", "kelvin"],
+)
+def test_a_lookalike_of_a_vendor_mailbox_hits(local, domain):
+    """James on #98: Unicode IGNORECASE folds these onto `s`, `i` and `k`, so the system
+    address list would have waved a lookalike through. The long s also holds that a hit in
+    either form counts: its NFKC form is the real mailbox, and that must not clear the raw
+    line."""
+    hits = _scan(f"x = '{local}" + "@" + f"{domain}'\n")
+    assert [(h.kind, h.label) for h in hits] == [("public", "email")]
+
+
+def test_a_system_address_in_any_case_still_passes():
+    assert _scan("x = 'NEWSLETTER" + "@" + "LinkedIn.com'\n") == []
+
+
 def test_an_underscore_still_ends_a_domain():
     """No host name holds one, so the wider class changes nothing for ASCII addresses."""
     assert _scan("x = 'a@exa_mple.org'\n") == []

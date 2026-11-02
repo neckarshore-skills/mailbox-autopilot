@@ -47,7 +47,7 @@ SYSTEM_ADDRESS_RE = re.compile(
     r"|(?:mailer-daemon|bounce-\d+|noreply)@ionos\.de"
     r"|news@medium\.com"
     r")$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,  # Unicode folding would wave `ſ`, `ı` and U+212A lookalikes through
 )
 # Unicode word characters: an ASCII class matches nothing in an address with an umlaut in its
 # domain, and this repository's subject is German mail (James on #96, T1).
@@ -336,9 +336,12 @@ def scan_lines(entries, private_patterns, allow) -> list[Hit]:
     for path, n, line in entries:
         if _allowed(path, line, allow):
             continue
+        # Both forms: `\w` takes no combining mark, so a decomposed domain needs NFKC, and a
+        # hit in either counts, so normalising cannot remove one (James on #98, U1).
         if any(
             not _email_allowed(m.group(1)) and not SYSTEM_ADDRESS_RE.match(m.group(0))
-            for m in EMAIL_RE.finditer(line)
+            for form in {line, unicodedata.normalize("NFKC", line)}
+            for m in EMAIL_RE.finditer(form)
         ):
             hits.append(Hit(path, n, "public", "email"))
         if any(_iban_valid(m.group(1)) for m in IBAN_RE.finditer(line)):
