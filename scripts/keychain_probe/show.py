@@ -18,7 +18,11 @@ def line(r: dict) -> str:
         step = r.get("prepare", r.get("reset", {}))
         return f"{head}: {r.get('action')} {json.dumps(step)} ({who})"
     canary = "CANARY READ" if read.get("value_equals_canary") else "no canary"
-    return f"{head}: {canary}, {read.get('outcome')}, OSStatus {read.get('osstatus')} ({who})"
+    unlock = r.get("unlock", {})
+    failed = " UNLOCK FAILED," if unlock.get("rc") or unlock.get("errors") else ""
+    return (
+        f"{head}: {canary},{failed} {read.get('outcome')}, OSStatus {read.get('osstatus')} ({who})"
+    )
 
 
 def records(path: str) -> list[dict]:
@@ -27,9 +31,12 @@ def records(path: str) -> list[dict]:
 
 
 def prepared(path: str) -> bool:
-    """Every `prepare` in this file worked. A failed one makes the next arm meaningless."""
+    """Every `prepare` in this file worked: return code 0, which shows only the last line
+    of `security -i`, and no failed line. A failed one makes the next arm meaningless."""
     found = records(path)
-    return bool(found) and all(r.get("prepare", {}).get("rc") == 0 for r in found)
+    return bool(found) and all(
+        r.get("prepare", {}).get("rc") == 0 and not r["prepare"].get("errors") for r in found
+    )
 
 
 def winner(path: str) -> str:
@@ -45,7 +52,7 @@ if __name__ == "__main__":
     if sys.argv[1] == "--prepared":
         sys.exit(0 if prepared(sys.argv[2]) else 1)
     if sys.argv[1] == "--winner":
-        print(winner(sys.argv[2]))
+        sys.stdout.write(winner(sys.argv[2]))  # no newline: no winner writes nothing at all
         sys.exit(0)
     for record in records(sys.argv[1]):
         print(line(record))

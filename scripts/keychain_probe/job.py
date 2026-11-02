@@ -109,8 +109,9 @@ def _keychain_path() -> str:
 
 
 def security_script(lines: list[str], secret: str = "") -> dict:
-    """Run `security` commands from stdin, so a secret never sits in argv. One failed
-    line makes the return code 1 and prints `<command>: returned <n>`."""
+    """Run `security` commands from stdin, so a secret never sits in argv. The return
+    code is that of the last line only. A failed line prints `<command>: returned <n>`,
+    so `errors` is what tells, and show.py requires it empty (measured on macOS 27)."""
     r = subprocess.run(
         [SECURITY, "-i"], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=60
     )
@@ -155,8 +156,12 @@ def prepare(secret: str, *, trust: bool, partition: str) -> dict:
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     if os.path.exists(path):
         security_script([f"delete-keychain {path}"])
+    # On its own: `add-generic-password` with a keychain that does not exist writes to the
+    # default keychain without a word (measured), so nothing runs after a failed create.
+    created = security_script([f"create-keychain -p {secret} {path}"], secret)
+    if created["rc"] or created["errors"]:
+        return created
     lines = [
-        f"create-keychain -p {secret} {path}",
         f"list-keychains -d user -s {path}",
         f"default-keychain -d user -s {path}",
         f"unlock-keychain -p {secret} {path}",

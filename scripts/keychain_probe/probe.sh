@@ -88,8 +88,10 @@ run_job() { # arm mode action [job arguments]
 }
 
 proven_partition() { # stop rule: arms 4, 6 and 7 mean something only with what arm 3 proved
-  [ -s "$PARTITION" ] || die "no half of arm 3 read the canary. Stop here, and tell Obi"
-  cat "$PARTITION"
+  local proven=""
+  if [ -f "$PARTITION" ]; then proven=$(cat "$PARTITION"); fi
+  [ -n "$proven" ] || die "no half of arm 3 read the canary. Stop here, and tell Obi"
+  printf '%s\n' "$proven"
 }
 
 home_ready() {
@@ -233,8 +235,16 @@ cmd_status() { # exit 1 on any hit, so the closing line is only printed when it 
   if launchctl print "system/$LABEL" >/dev/null 2>&1; then say "$LABEL is loaded"; bad=1; fi
   if [ -e "/Users/$USER_NAME" ]; then say "/Users/$USER_NAME exists"; bad=1; fi
   if [ -e "$KEPT_REPORT" ]; then say "$KEPT_REPORT exists"; bad=1; fi
-  if sfltool dumpbtm 2>/dev/null | grep -qF "$LABEL"; then
-    say "a background task record for $LABEL remains (run sheet, What stays)"
+  local records
+  if records=$(sfltool dumpbtm 2>/dev/null); then
+    case "$records" in
+      *"$LABEL"*)
+        say "a background task record for $LABEL remains (run sheet, What stays)"
+        bad=1
+        ;;
+    esac
+  else
+    say "sfltool failed, so a background task record is unchecked"
     bad=1
   fi
   if [ "$bad" = 0 ]; then say "no user, group, directory, daemon or report of the probe is left"; fi

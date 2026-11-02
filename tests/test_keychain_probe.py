@@ -8,6 +8,7 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -167,10 +168,14 @@ def security(monkeypatch, tmp_path):
     return calls
 
 
+def _scripts(calls) -> str:
+    return "\n".join(script for _, script in calls)
+
+
 def test_the_unlock_secret_goes_to_security_on_stdin_never_in_argv(security):
     job.prepare("s3cret", trust=True, partition="unsigned")
-    argv, script = security[0]
-    assert argv == [job.SECURITY, "-i"] and "s3cret" not in " ".join(argv)
+    assert all(argv == [job.SECURITY, "-i"] for argv, _ in security)
+    script = _scripts(security)
     assert "create-keychain -p s3cret" in script
     assert "-S apple-tool:,apple:,unsigned: " in script
 
@@ -179,7 +184,7 @@ def test_the_cdhash_half_names_this_interpreter(security, monkeypatch):
     """James on #97, section 2: an ad-hoc signed binary may get a `cdhash:` partition."""
     monkeypatch.setattr(job, "_codesign", lambda: "Identifier=x\nCDHash=abc123\n")
     job.prepare("s", trust=True, partition="cdhash")
-    assert "-S apple-tool:,apple:,cdhash:abc123 " in security[0][1]
+    assert "-S apple-tool:,apple:,cdhash:abc123 " in _scripts(security)
 
 
 def test_the_signature_is_read_at_the_level_that_shows_the_cdhash(security):
@@ -190,7 +195,8 @@ def test_the_signature_is_read_at_the_level_that_shows_the_cdhash(security):
 
 def test_the_partition_list_and_the_trust_entry_are_each_a_switch(security):
     job.prepare("s", trust=False, partition="none")
-    script = security[0][1]
+    script = _scripts(security)
+    assert "add-generic-password" in script
     assert " -T " not in script and "partition-list" not in script
 
 
@@ -242,6 +248,226 @@ def test_a_failed_prepare_stops_the_run(tmp_path, record, ok):
 
 def test_an_empty_prepare_output_stops_the_run(tmp_path):
     assert show.prepared(_report(tmp_path)) is False
+
+
+def test_no_winner_writes_nothing_at_all(tmp_path):
+    """James's re-read of #97, N1: a lone newline passed the shell's `-s`."""
+    report = _report(tmp_path, _arm("arm3a", False), _arm("arm3b", False), _arm("arm3c", False))
+    r = subprocess.run(
+        [sys.executable, str(PROBE / "show.py"), "--winner", report],
+        capture_output=True,
+        timeout=30,
+    )
+    assert (r.returncode, r.stdout) == (0, b"")
+
+
+def test_a_failed_line_with_a_good_return_code_is_a_failed_prepare(tmp_path):
+    """James's re-read of #97, N2: `security -i` returns the status of its last line."""
+    record = {"prepare": {"rc": 0, "errors": ["add-generic-password: returned 45"]}}
+    assert show.prepared(_report(tmp_path, record)) is False
+
+
+def test_a_failed_create_stops_before_the_canary_can_land_elsewhere(monkeypatch, tmp_path):
+    """Measured: `add-generic-password` with a keychain that does not exist writes to the
+    default keychain without a word."""
+    seen = []
+
+    def run(argv, input=None, **kw):
+        seen.append(input)
+        return SimpleNamespace(returncode=1, stdout="create-keychain: returned 1", stderr="")
+
+    monkeypatch.setattr(job.subprocess, "run", run)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    result = job.prepare("s", trust=True, partition="none")
+    assert result["errors"] == ["create-keychain: returned 1"]
+    assert len(seen) == 1 and "add-generic-password" not in seen[0]
+
+
+def test_a_failed_unlock_shows_on_the_line_the_owner_reads():
+    line = show.line(
+        {
+            "arm": "arm3a",
+            "mode": "drop",
+            "unlock": {"rc": 1, "errors": ["unlock-keychain: returned 1"]},
+            "read": {"outcome": "none", "osstatus": None, "value_equals_canary": False},
+        }
+    )
+    assert "UNLOCK FAILED" in line
+
+
+# --- the runner past its guard, against stand-ins for the system ----------------------
+
+FAKE_LAUNCHCTL = r"""#!PYTHON
+import json, os, plistlib, sys
+if sys.argv[1] != "bootstrap":
+    sys.exit(1 if sys.argv[1] == "print" else 0)
+doc = plistlib.load(open(sys.argv[3], "rb"))
+args = doc["ProgramArguments"]
+open(os.environ["WALK_LOG"], "a").write(json.dumps(args) + "\n")
+get = lambda flag: args[args.index(flag) + 1]
+arm, action = get("--arm"), get("--action")
+r = {"arm": arm, "mode": get("--mode"), "action": action, "facts": {"uid": 501}}
+if action == "prepare":
+    bad = arm == os.environ.get("WALK_FAIL_PREPARE")
+    r["prepare"] = {"rc": 0, "errors": ["add-generic-password: returned 45"] if bad else []}
+if action in ("read", "unlock-read"):
+    hit = arm in os.environ.get("WALK_READS", "").split(",")
+    r["read"] = {"outcome": "value", "osstatus": None, "value_equals_canary": hit}
+open(doc["StandardOutPath"], "a").write(json.dumps(r) + "\n")
+"""
+FAKE_ID = r"""#!/bin/bash
+if [ "$1" = "-u" ]; then echo 0; exit 0; fi
+[ -e "$WALK_ROOT/user-exists" ]
+"""
+FAKE_SYSADMINCTL = r"""#!/bin/bash
+if [ "$1" = "-addUser" ]; then
+  touch "$WALK_ROOT/user-exists"
+else
+  rm -f "$WALK_ROOT/user-exists"
+fi
+"""
+FAKE_INSTALL = r"""#!/bin/bash
+while [ "${1#-}" != "$1" ]; do shift 2; done
+cp "$@"
+"""
+FAKE_UV = r"""#!/bin/bash
+for a; do last="$a"; done
+if [ "$2" = "venv" ]; then
+  mkdir -p "$last/bin"
+  ln -s "$WALK_PYTHON" "$last/bin/python"
+fi
+if [ "$2" = "python" ]; then mkdir -p "$UV_PYTHON_INSTALL_DIR"; fi
+"""
+FAKE_TAR = r"""#!/bin/bash
+for a; do dir="$a"; done
+mkdir -p "$dir/uv-aarch64-apple-darwin"
+cp "$WALK_ROOT/stubs/fake-uv" "$dir/uv-aarch64-apple-darwin/uv"
+"""
+SIMPLE_STUBS = {
+    "chown": "",
+    "createhomedir": 'mkdir -p "$WALK_ROOT/Users/mbxprobe"',
+    "curl": "",
+    "dscl": "exit 1",
+    "dseditgroup": "",
+    "hostname": "echo M1mini",
+    "openssl": "echo abc123",
+    "sfltool": "",
+    "shasum": "cat >/dev/null",
+    "stat": "echo german",
+    "uname": "echo Darwin",
+}
+
+
+@pytest.fixture
+def walk(tmp_path):
+    """`probe.sh` with its paths moved under tmp_path and the system's tools stood in for, so
+    every branch past `guard` runs, under `/bin/bash`, which is 3.2 on a Mac. This shows the
+    script holds together. It says nothing about launchd, the keychain or the real tools."""
+    root = tmp_path / "root"
+    for d in ("Library/LaunchDaemons", "Users/Shared", "run", "stubs"):
+        (root / d).mkdir(parents=True)
+    text = (PROBE / "probe.sh").read_text(encoding="utf-8")
+    script = root / "run" / "probe.sh"
+    script.write_text(
+        text.replace("/Library/", f"{root}/Library/").replace("/Users/", f"{root}/Users/"),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    for name in ("job.py", "show.py", "requirements.txt"):
+        (root / "run" / name).write_text(
+            (PROBE / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    stubs = {
+        "id": FAKE_ID,
+        "install": FAKE_INSTALL,
+        "fake-uv": FAKE_UV,
+        "launchctl": FAKE_LAUNCHCTL.replace("PYTHON", sys.executable, 1),
+        "sysadminctl": FAKE_SYSADMINCTL,
+        "tar": FAKE_TAR,
+    }
+    stubs.update({k: f"#!/bin/bash\n{v}\n" for k, v in SIMPLE_STUBS.items()})
+    for name, body in stubs.items():
+        path = root / "stubs" / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    env = {
+        "PATH": f"{root / 'stubs'}:{os.environ['PATH']}",
+        "WALK_ROOT": str(root),
+        "WALK_LOG": str(root / "jobs.log"),
+        "WALK_PYTHON": sys.executable,
+    }
+
+    def run(*commands, **extra):
+        last = None
+        for command in commands:
+            last = subprocess.run(
+                [str(script), command],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={**env, **extra},
+            )
+            if last.returncode != 0:
+                return last
+        return last
+
+    run.root = root
+    run.jobs = lambda: [
+        json.loads(line) for line in (root / "jobs.log").read_text(encoding="utf-8").splitlines()
+    ]
+    return run
+
+
+def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(walk):
+    reads = "arm3b,arm4b,arm7,arm5"
+    r = walk("setup", "arm1", "arm2", "arm3", "arm6", "arm7", "arm4-install", WALK_READS=reads)
+    assert r.returncode == 0, r.stderr
+    directory = walk.root / "Library/mailbox-autopilot-probe"
+    (directory / "out/arm4-boot.out").write_text(
+        json.dumps({"arm": "arm4", "mode": "drop", "read": {"value_equals_canary": True}}) + "\n",
+        encoding="utf-8",
+    )
+    r = walk("arm4-read", "arm4b", "arm5-reset", "arm5-read", "report", WALK_READS=reads)
+    assert r.returncode == 0, r.stderr
+    assert "arm5/username" in r.stdout or '"arm5"' in r.stdout
+    prepared = [a for a in walk.jobs() if "prepare" in a]
+    later = [a for a in prepared if a[a.index("--arm") + 1].startswith(("arm4", "arm6", "arm7"))]
+    assert later and all(a[a.index("--partition") + 1] == "unsigned" for a in later)
+    assert any(a[0].endswith("venv312/bin/python") for a in walk.jobs())
+
+    r = walk("cleanup")
+    assert r.returncode == 1  # the report is still there, and status says so
+    assert "keychain-probe-report.jsonl exists" in r.stdout
+    (walk.root / "Users/Shared/keychain-probe-report.jsonl").unlink()
+    r = walk("status")
+    assert r.returncode == 0 and "of the probe is left" in r.stdout
+
+
+def test_no_half_of_arm_3_stops_the_run_with_the_right_reason(walk):
+    r = walk("setup", "arm3")
+    assert r.returncode == 2 and "no half of arm 3 read the canary" in r.stderr
+    for arm in ("arm6", "arm7", "arm4-install"):
+        r = walk(arm)
+        assert r.returncode == 2 and "no half of arm 3 read the canary" in r.stderr
+
+
+def test_a_failed_prepare_line_stops_the_run_with_the_right_reason(walk):
+    r = walk("setup", "arm2", WALK_FAIL_PREPARE="arm2-prepare")
+    assert r.returncode == 2 and "prepare failed" in r.stderr
+
+
+def test_a_failing_sfltool_is_not_a_clean_status(walk):
+    (walk.root / "stubs/sfltool").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+    r = walk("status")
+    assert r.returncode == 1 and "sfltool failed" in r.stdout
+
+
+def test_a_background_task_record_is_named(walk):
+    (walk.root / "stubs/sfltool").write_text(
+        "#!/bin/bash\necho ai.neckarshore.keychain-probe\n", encoding="utf-8"
+    )
+    r = walk("status")
+    assert r.returncode == 1 and "background task record" in r.stdout
 
 
 @pytest.mark.parametrize("user, shaped", [(None, False), ("u", True)], ids=["drop", "username"])

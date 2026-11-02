@@ -27,6 +27,8 @@ It uses no real password, no Claude token (arm 8 is not released) and no mailbox
 
 Keep `auth test` output out of the report, the PR, the ticket and any agent session (#82).
 
+> **Warning:** `probe.sh` has never run against the real thing. Past its `guard` it has only walked through tests with stand-ins for launchd and the system tools, under bash 3.2 and in CI. That shows the script holds together, not that `launchctl`, `sysadminctl` or `security` answer as expected in a job with no session. So step 1 is its first real run. If a step behaves differently from this sheet, stop and tell Obi.
+
 **Measured on the target Mac, 2026-11-02:** macOS 27.0.1 on arm64. FileVault is off, so a reboot comes back without a password. Auto-login is on for `german`, uid 501. uv and this repo are not installed there, which is why the script brings uv itself.
 
 ## Before you start
@@ -68,14 +70,14 @@ Run the steps top to bottom. Each prints one line per arm. Paste those lines to 
 | 12 | One GUI login as **Keychain Probe**, at the machine or by Screen Sharing, before 02:00. `german` is logged in by auto-login, so use Fast User Switching in Control Center, which keeps his session running. If it is off, log `german` out; step 13 brings him back, and his session, the backup included, stops until then. Skip every assistant screen, run the printed command in that user's Terminal, and log out | By hand | Terminal returns without an error |
 | 13 | Backup check, then reboot | As in step 8 | `not running`. Back in about 2 minutes |
 | 14 | Arm 5: after one login | `sudo ./probe.sh arm5-read` | `no canary`, locked |
-| 15 | Backup proof, as `german`, no `sudo`. How long a run takes is unmeasured; wait for it | `launchctl kickstart gui/501/<label>`, then read `<status file>` | Exit 0, with today's time |
+| 15 | Backup proof, as `german`, no `sudo`. It must stay `kickstart`: the backup script started directly in an SSH session fails on the Keychain, which would be a false alarm. Whether `kickstart` works over SSH is unmeasured; if it refuses, do this step at the machine. How long a run takes is unmeasured too; wait for it | `launchctl kickstart gui/501/<label>`, then read `<status file>` | Exit 0, with today's time |
 | 16 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job. Obi takes it |
 | 17 | Clean up | `sudo ./probe.sh cleanup` | Exits 1 and names the report, because it is still there |
 | 18 | After Obi has the report | `sudo rm /Users/Shared/keychain-probe-report.jsonl`, then `sudo ./probe.sh status`, then `cd ~ && rm -r keychain-probe` | The closing line of `status`. A remaining background task record is named instead, see "What stays" |
 
 **Stop rules, both enforced by the script.** If no half of arm 3 reads the canary, arms 4, 6 and 7 refuse to run, because they mean something only with the partition arm 3 proved. A `prepare` that fails stops the run at once. In both cases do not reboot. Tell Obi, then run `cleanup`.
 
-If any other step stops with an error, do not retry it. `sudo ./probe.sh cleanup` removes what the steps created, also after a failed user deletion, and an interrupted sitting does no harm: arm 4's job would run once at the next boot and read a canary.
+If any other step stops with an error, do not retry it. `sudo ./probe.sh cleanup` removes what the steps created, also after a failed user deletion, and an interrupted sitting does no harm: arm 4's job would run once at the next boot and read a canary. **If you stop during step 12 and logged `german` out, log him back in before 02:00,** or the night's backup does not run.
 
 ## What the result decides
 
