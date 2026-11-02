@@ -1,8 +1,8 @@
 # Keychain probe: run sheet
 
-**For the owner, at the target Mac, with Obi on the line.** It answers #76 L11: can a launchd job of a user who never logs in read a keychain? Without an answer the launcher cannot start. The design is James's read of 2026-11-02, section 6.
+**For the owner, at the target Mac, with Obi on the line.** It answers #76 L11: can a launchd job of a user who never logs in read a keychain? Without an answer the launcher cannot start. The design is James's read of 2026-11-02, section 6, and his read of this probe on #97.
 
-> **Important:** This creates a throwaway user and a LaunchDaemon, and it reboots the target Mac twice. Do not reboot around 02:30, when the Paperless backup runs. Plan about 45 minutes.
+> **Important:** This creates a throwaway user and a LaunchDaemon, and it reboots the target Mac twice. Those are the first restarts since the Paperless backup was installed, so the sitting also proves that the backup survives one (step 15). Do not reboot between 02:00 and 04:00, and be done with step 12 before 02:00. Plan about an hour.
 
 ## What it touches
 
@@ -14,17 +14,30 @@
 | 4 | `/Library/LaunchDaemons/ai.neckarshore.keychain-probe.plist`, one job at a time | ✅ |
 | 5 | A keychain item with the value `CANARY` | ✅ with the user |
 
-It uses no real password, no Claude token (arm 8 is not released) and no mailbox. The only file it leaves is `/Users/Shared/keychain-probe-report.jsonl`, which holds uids, paths and result codes. Keep `auth test` output out of it and out of the PR (#82).
+It uses no real password, no Claude token (arm 8 is not released) and no mailbox. It touches nothing of the backup, its files or the Docker stack.
 
-**Measured on the target Mac, 2026-11-02:** macOS 27.0.1 on arm64. FileVault is off, so a reboot comes back without a password. Auto-login is on for `german`. uv and this repo are not installed there, which is why the script brings uv itself.
+**What stays after `cleanup`:**
+
+| # | Thing | Effect |
+|---|-------|--------|
+| 1 | `/Users/Shared/keychain-probe-report.jsonl` | Uids, paths and result codes, no secret. You remove it in step 18 |
+| 2 | Your copy in `~/keychain-probe` | You remove it in step 18 |
+| 3 | Per-user directories under `/private/var/folders` for the deleted uid | A harmless orphan, unmeasured. A later user with the same uid inherits it |
+| 4 | A Background Task Management record for the daemon's label, and a notification to `german` | Harmless, unmeasured. `status` names the record and exits 1 while it is there |
+
+Keep `auth test` output out of the report, the PR, the ticket and any agent session (#82).
+
+**Measured on the target Mac, 2026-11-02:** macOS 27.0.1 on arm64. FileVault is off, so a reboot comes back without a password. Auto-login is on for `german`, uid 501. uv and this repo are not installed there, which is why the script brings uv itself.
 
 ## Before you start
 
-On your laptop, Obi copies the script over:
+Obi copies the script over from the laptop:
 
 ```bash
 scp -r scripts/keychain_probe m1:keychain-probe
 ```
+
+Obi also names the backup's LaunchAgent label and status file. They are in the install record and stay out of this public repo; below they read `<label>` and `<status file>`.
 
 Then, in one terminal on the target Mac (at the machine or `ssh -t m1`):
 
@@ -33,41 +46,50 @@ cd ~/keychain-probe
 sudo ./probe.sh status
 ```
 
-Expected: `no user, group, directory or daemon of the probe is left`.
+Expected: `no user, group, directory, daemon or report of the probe is left`.
 
 ## The sitting
 
-Run the steps top to bottom. Each prints one line per arm; paste those lines to Obi.
+Run the steps top to bottom. Each prints one line per arm. Paste those lines to Obi, **except the password line of step 11**.
 
 | # | Step | Command | Expected |
 |---|------|---------|----------|
 | 1 | Set up, about 3 minutes | `sudo ./probe.sh setup` | Ends with `done. Next: arm1` |
 | 2 | Arm 1: never logged in | `sudo ./probe.sh arm1` | `no canary`: no keychain at all |
 | 3 | Arm 2: a keychain, locked | `sudo ./probe.sh arm2` | `no canary`, OSStatus -25308 or similar |
-| 4 | Arm 3: the job unlocks it | `sudo ./probe.sh arm3` | `CANARY READ` in `arm3a` or `arm3b` |
+| 4 | Arm 3: the job unlocks it, in three halves. **Stop rule below** | `sudo ./probe.sh arm3` | `CANARY READ` in at least one of `arm3a`, `arm3b`, `arm3c`, then `partition that read:` |
 | 5 | Arm 6: no trust entry, other interpreter | `sudo ./probe.sh arm6` | `no canary` twice |
-| 6 | Arm 7: red control, wrong service | `sudo ./probe.sh arm7` | `no canary`, outcome `none` (-25300 is mapped to it) |
-| 7 | Arm 4, before the reboot. Add `--partition` if only `arm3b` read the canary | `sudo ./probe.sh arm4-install` | `installed for the next boot` |
-| 8 | Reboot | `sudo shutdown -r now` | Back in about 2 minutes |
-| 9 | Arm 4: at boot | `sudo ./probe.sh arm4-read` | `CANARY READ`, `facts.boottime` is the new boot |
-| 10 | Arm 5, before the GUI login | `sudo ./probe.sh arm5-reset` | Prints the password and one command |
-| 11 | One GUI login as **Keychain Probe**, at the machine or by Screen Sharing. `german` is logged in by auto-login, so use Fast User Switching in Control Center, which keeps his session running. If it is off, log `german` out; step 12 brings him back, and what runs in his session stops until then. Skip every assistant screen, run the printed command in that user's Terminal, and log out | By hand | Terminal returns without an error |
-| 12 | Reboot | `sudo shutdown -r now` | Back in about 2 minutes |
-| 13 | Arm 5: after one login | `sudo ./probe.sh arm5-read` | `no canary`, locked |
-| 14 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job |
-| 15 | Clean up, then remove the copy | `sudo ./probe.sh cleanup && cd ~ && rm -r keychain-probe` | `no user, group, directory or daemon of the probe is left` |
+| 6 | Arm 7: red control, wrong service | `sudo ./probe.sh arm7` | `no canary`, outcome `none` |
+| 7 | Arm 4, before the reboot | `sudo ./probe.sh arm4-install` | `installed for the next boot` |
+| 8 | Backup check, then reboot | `launchctl print gui/501/<label> \| grep 'state ='`, then `sudo shutdown -r now` | `not running`. Back in about 2 minutes |
+| 9 | Arm 4: the job at boot | `sudo ./probe.sh arm4-read` | `CANARY READ`. The console user shows who won the race against auto-login |
+| 10 | Arm 4b: the state of the 14 runs a day. Wait until `german` is logged in | `sudo ./probe.sh arm4b` | `CANARY READ`, console `german` |
+| 11 | Arm 5, before the GUI login | `sudo ./probe.sh arm5-reset` | Prints the password and one command. Do not paste the password line |
+| 12 | One GUI login as **Keychain Probe**, at the machine or by Screen Sharing, before 02:00. `german` is logged in by auto-login, so use Fast User Switching in Control Center, which keeps his session running. If it is off, log `german` out; step 13 brings him back, and his session, the backup included, stops until then. Skip every assistant screen, run the printed command in that user's Terminal, and log out | By hand | Terminal returns without an error |
+| 13 | Backup check, then reboot | As in step 8 | `not running`. Back in about 2 minutes |
+| 14 | Arm 5: after one login | `sudo ./probe.sh arm5-read` | `no canary`, locked |
+| 15 | Backup proof, as `german`, no `sudo`. How long a run takes is unmeasured; wait for it | `launchctl kickstart gui/501/<label>`, then read `<status file>` | Exit 0, with today's time |
+| 16 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job. Obi takes it |
+| 17 | Clean up | `sudo ./probe.sh cleanup` | Exits 1 and names the report, because it is still there |
+| 18 | After Obi has the report | `sudo rm /Users/Shared/keychain-probe-report.jsonl`, then `sudo ./probe.sh status`, then `cd ~ && rm -r keychain-probe` | The closing line of `status`. A remaining background task record is named instead, see "What stays" |
 
-After each reboot, check that the services of this machine came back, as you would after any restart.
+**Stop rules, both enforced by the script.** If no half of arm 3 reads the canary, arms 4, 6 and 7 refuse to run, because they mean something only with the partition arm 3 proved. A `prepare` that fails stops the run at once. In both cases do not reboot. Tell Obi, then run `cleanup`.
+
+If any other step stops with an error, do not retry it. `sudo ./probe.sh cleanup` removes what the steps created, also after a failed user deletion, and an interrupted sitting does no harm: arm 4's job would run once at the next boot and read a canary.
 
 ## What the result decides
 
 | # | Result | Decision |
 |---|--------|----------|
-| 1 | Arms 3 and 4 read the canary | The fallback of L11 works: a dedicated keychain, unlocked by the launcher's root part. L11 gets this route, and the launcher can be specified |
-| 2 | Arm 3 reads it and arm 4 does not | Something in the boot state is missing. Obi reads the arm 4 facts before anything else |
-| 3 | Neither reads it | No route exists yet. MASCHIN ruled out a credential file, so this goes back to him and James |
-| 4 | Arm 7 reads the canary, or says anything but missing | The probe cannot tell missing from locked, so no arm counts. Stop and tell Obi |
+| 1 | Arms 3, 4 and 4b read the canary | The fallback of L11 works: a dedicated keychain, unlocked by the launcher's root part. L11 gets this route, and the launcher can be specified. The partition that reaches production is the one that read here, not the probe's list |
+| 2 | Half 3c is the one that read | The same, and every interpreter bump changes the partition, so it joins the T6 bump procedure |
+| 3 | Arm 4 reads and arm 4b does not, or the other way round | The login state matters after all. Obi reads the facts of both before anything else |
+| 4 | No half of arm 3 reads | No route exists yet. MASCHIN ruled out a credential file, so this goes back to him and James |
+| 5 | Arm 7 reads the canary, or says anything but missing | The probe cannot tell missing from locked, so no arm counts. Stop and tell Obi |
+| 6 | Step 15 does not end with exit 0 | The backup does not survive a reboot. That is a finding for MASCHIN tonight, independent of the probe, and the next night's run would fail too |
 
-**Two things this cannot show.** "Nobody logged in" in James's table is not this machine's state: `german` logs in by himself after each reboot, and the sheet leaves that as it is, because that is how the target Mac runs. The partition list in `arm3b` is Obi's addition, not James's, because `add-generic-password` writes only Apple's partitions; `facts.codesign` shows what signs the interpreter.
+**Three things this cannot show.**
 
-If a step stops with an error, do not retry it. `sudo ./probe.sh cleanup` removes what the steps created. Its report and your copy of the script stay until you remove them.
+1. **"Nobody logged in" is not this machine's state.** `german` logs in by himself after each reboot. Arm 4 runs at boot, in a race against auto-login, and shows a boot start. Arm 4b shows the hourly job. Both stay in, because the FileVault decision may change which of them is production.
+2. **The partition list is not in James's first table.** `add-generic-password` writes only Apple's partitions, so without it a failed arm 3 would say nothing about keychains. That an ad-hoc signed binary needs `cdhash:` rather than `unsigned:` is James's expectation, unmeasured until this run.
+3. **The result holds for FileVault off.** Whether it goes on before the first real mail is the owner's decision (James on #97, section 3). If it does, auto-login goes off too, and arms 3, 4 and 4b run once more: about 10 minutes and one reboot.

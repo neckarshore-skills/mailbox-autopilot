@@ -4,6 +4,7 @@ everywhere else, its secrets stay out of argv, and the value it reads is never p
 
 import importlib.util
 import json
+import os
 import plistlib
 import re
 import subprocess
@@ -18,14 +19,15 @@ ROOT = Path(__file__).resolve().parent.parent
 PROBE = ROOT / "scripts" / "keychain_probe"
 
 
-def _load():
-    spec = importlib.util.spec_from_file_location("keychain_probe_job", PROBE / "job.py")
+def _load(name):
+    spec = importlib.util.spec_from_file_location(f"keychain_probe_{name}", PROBE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-job = _load()
+job = _load("job")
+show = _load("show")
 
 
 def test_the_runner_refuses_anywhere_but_the_target_mac_as_root():
@@ -34,6 +36,35 @@ def test_the_runner_refuses_anywhere_but_the_target_mac_as_root():
     )
     assert r.returncode == 2
     assert "probe:" in r.stderr
+
+
+def test_the_runner_can_be_started_as_the_sheet_says():
+    """James on #97, finding 1: the sheet says `sudo ./probe.sh`."""
+    assert os.access(PROBE / "probe.sh", os.X_OK)
+
+
+def _script_commands() -> set[str]:
+    script = (PROBE / "probe.sh").read_text(encoding="utf-8")
+    return set(re.findall(r"^  ([a-z0-9-]+)\) cmd_", script, re.M))
+
+
+def test_every_command_of_the_run_sheet_exists():
+    sheet = (ROOT / "docs/2026-11-02-keychain-probe-runsheet.md").read_text(encoding="utf-8")
+    used = set(re.findall(r"probe\.sh ([a-z0-9-]+)", sheet))
+    assert {"setup", "arm3", "arm4b", "status", "cleanup"} <= used
+    assert used <= _script_commands()
+
+
+def test_the_output_directory_is_not_open_to_everyone():
+    """James on #97, finding 5: root writes predictable names there."""
+    script = (PROBE / "probe.sh").read_text(encoding="utf-8")
+    assert "1777" not in script and "chown -h" in script
+
+
+def test_setup_keeps_root_out_of_the_owners_home():
+    """James on #97, finding 6: sudo keeps HOME on macOS, and uv writes there."""
+    script = (PROBE / "probe.sh").read_text(encoding="utf-8")
+    assert "export HOME=/var/root" in script
 
 
 def test_the_runner_is_valid_bash():
@@ -137,15 +168,28 @@ def security(monkeypatch, tmp_path):
 
 
 def test_the_unlock_secret_goes_to_security_on_stdin_never_in_argv(security):
-    job.prepare("s3cret", trust=True, partition=True)
+    job.prepare("s3cret", trust=True, partition="unsigned")
     argv, script = security[0]
     assert argv == [job.SECURITY, "-i"] and "s3cret" not in " ".join(argv)
     assert "create-keychain -p s3cret" in script
-    assert "set-generic-password-partition-list" in script
+    assert "-S apple-tool:,apple:,unsigned: " in script
+
+
+def test_the_cdhash_half_names_this_interpreter(security, monkeypatch):
+    """James on #97, section 2: an ad-hoc signed binary may get a `cdhash:` partition."""
+    monkeypatch.setattr(job, "_codesign", lambda: "Identifier=x\nCDHash=abc123\n")
+    job.prepare("s", trust=True, partition="cdhash")
+    assert "-S apple-tool:,apple:,cdhash:abc123 " in security[0][1]
+
+
+def test_the_signature_is_read_at_the_level_that_shows_the_cdhash(security):
+    """`codesign -dv` prints no CDHash, and half 3c needs it."""
+    job._codesign()
+    assert security[0][0][:2] == ["/usr/bin/codesign", "-dvvv"]
 
 
 def test_the_partition_list_and_the_trust_entry_are_each_a_switch(security):
-    job.prepare("s", trust=False, partition=False)
+    job.prepare("s", trust=False, partition="none")
     script = security[0][1]
     assert " -T " not in script and "partition-list" not in script
 
@@ -156,6 +200,48 @@ def test_a_secret_in_an_error_line_is_masked(monkeypatch):
 
     monkeypatch.setattr(job.subprocess, "run", run)
     assert job.security_script(["x"], "s3cret")["errors"] == ["unlock -p ***: returned 1"]
+
+
+def _report(tmp_path, *lines) -> str:
+    path = tmp_path / "report.jsonl"
+    path.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    return str(path)
+
+
+def _arm(name, read):
+    return {"arm": name, "read": {"value_equals_canary": read}}
+
+
+@pytest.mark.parametrize(
+    "reads, partition",
+    [
+        ((True, True, True), "none"),
+        ((False, True, True), "unsigned"),
+        ((False, False, True), "cdhash"),
+        ((False, False, False), ""),
+    ],
+    ids=["3a", "3b", "3c", "none"],
+)
+def test_later_arms_use_the_half_that_read_and_none_stops_them(tmp_path, reads, partition):
+    lines = [_arm(f"arm3{h}", r) for h, r in zip("abc", reads, strict=True)]
+    assert show.winner(_report(tmp_path, _arm("arm1", True), *lines)) == partition
+
+
+@pytest.mark.parametrize(
+    "record, ok",
+    [
+        ({"prepare": {"rc": 0}}, True),
+        ({"prepare": {"rc": 1}}, False),
+        ({"failed": "OSError"}, False),
+    ],
+    ids=["ok", "failed-line", "failed-job"],
+)
+def test_a_failed_prepare_stops_the_run(tmp_path, record, ok):
+    assert show.prepared(_report(tmp_path, record)) is ok
+
+
+def test_an_empty_prepare_output_stops_the_run(tmp_path):
+    assert show.prepared(_report(tmp_path)) is False
 
 
 @pytest.mark.parametrize("user, shaped", [(None, False), ("u", True)], ids=["drop", "username"])

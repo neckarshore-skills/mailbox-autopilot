@@ -32,9 +32,10 @@ ACCOUNT = "probe@example.invalid"
 CANARY = "CANARY"
 SECURITY = "/usr/bin/security"
 # What an interpreter outside Apple's own tools may need to read an item without a prompt:
-# `add-generic-password` writes only Apple's partitions. James's table does not name this,
-# so arm 3 runs without it (3a) and with it (3b).
-PARTITIONS = "apple-tool:,apple:,unsigned:"
+# `add-generic-password` writes only Apple's partitions. Arm 3 has three halves: none (3a),
+# `unsigned:` (3b) and the interpreter's own `cdhash:` (3c), because uv's Python is ad-hoc
+# signed. Later arms use the one that read: a list that was not proven proves nothing.
+BASE_PARTITIONS = "apple-tool:,apple:"
 
 
 def _run(*argv: str) -> tuple[int, str]:
@@ -59,9 +60,6 @@ def facts(group: str) -> dict:
     _, manager = _run("/bin/launchctl", "managername")
     _, console = _run("/usr/bin/stat", "-f", "%Su", "/dev/console")
     _, boot = _run("/usr/sbin/sysctl", "-n", "kern.boottime")
-    signed = subprocess.run(
-        ["/usr/bin/codesign", "-dv", _python()], capture_output=True, text=True, timeout=30
-    ).stderr
     me = pwd.getpwuid(os.getuid()).pw_name
     try:
         g = grp.getgrnam(group)
@@ -86,9 +84,24 @@ def facts(group: str) -> dict:
         "python_real": _python(),
         "python_version": sys.version.split()[0],
         "codesign": [
-            line for line in signed.splitlines() if line.startswith(("Identifier", "TeamId", "Sig"))
+            line
+            for line in _codesign().splitlines()
+            if line.startswith(("Identifier", "TeamId", "Sig", "CDHash"))
         ],
     }
+
+
+def _codesign() -> str:
+    return subprocess.run(
+        ["/usr/bin/codesign", "-dvvv", _python()], capture_output=True, text=True, timeout=30
+    ).stderr
+
+
+def _partitions(kind: str) -> str:
+    if kind == "unsigned":
+        return f"{BASE_PARTITIONS},unsigned:"
+    found = [x for x in _codesign().splitlines() if x.startswith("CDHash=")]
+    return f"{BASE_PARTITIONS},cdhash:{found[0].split('=', 1)[1]}"
 
 
 def _keychain_path() -> str:
@@ -135,7 +148,7 @@ def _add_item(path: str, *, trust: bool) -> str:
     return f"add-generic-password -s {SERVICE} -a {ACCOUNT} -w {CANARY}{trusted} {path}"
 
 
-def prepare(secret: str, *, trust: bool, partition: bool) -> dict:
+def prepare(secret: str, *, trust: bool, partition: str) -> dict:
     """A fresh dedicated keychain with the canary in it, left locked. Done from inside the
     job, because the search list belongs to the session that sets it."""
     path = _keychain_path()
@@ -149,10 +162,10 @@ def prepare(secret: str, *, trust: bool, partition: bool) -> dict:
         f"unlock-keychain -p {secret} {path}",
         _add_item(path, trust=trust),
     ]
-    if partition:
+    if partition != "none":
         lines.append(
-            f"set-generic-password-partition-list -S {PARTITIONS} -s {SERVICE} -a {ACCOUNT} "
-            f"-k {secret} {path}"
+            f"set-generic-password-partition-list -S {_partitions(partition)} -s {SERVICE} "
+            f"-a {ACCOUNT} -k {secret} {path}"
         )
     lines.append(f"lock-keychain {path}")
     return security_script(lines, secret)
@@ -232,7 +245,7 @@ def main(argv=None) -> int:
     ap.add_argument("--secret-file")
     ap.add_argument("--service", default=SERVICE)
     ap.add_argument("--no-trust", action="store_true")
-    ap.add_argument("--partition", action="store_true")
+    ap.add_argument("--partition", choices=("none", "unsigned", "cdhash"), default="none")
     args = ap.parse_args(argv)
     try:
         record = run_arm(args)
