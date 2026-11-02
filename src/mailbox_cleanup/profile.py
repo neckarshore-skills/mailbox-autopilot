@@ -66,6 +66,10 @@ _CAP_KEYS = frozenset({"per_run", "per_day"})
 _LABEL = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
 _SERVER_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})+", re.ASCII)
 MAX_SERVER = 253
+# Python's IDNA 2003 maps these away: `straße.de` would become `strasse.de`, another
+# registration, and the real domain would stay unlisted while the owner believes it is
+# not (James on #96, finding 4). Such an entry is refused and asks for its `xn--` form.
+_IDNA_2003_CHANGES = frozenset("ßς\u200c\u200d")
 _AUTHSERV_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*", re.ASCII)  # RFC 8601, one name
 
 
@@ -217,6 +221,8 @@ def _suppress(value) -> tuple[str, ...]:
     refuses, because the owner would believe it hides something."""
     if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
         raise _invalid("suppress must be a list of domains")
+    if any(_IDNA_2003_CHANGES & set(v) for v in value):
+        raise _invalid("suppress has a domain that needs its xn-- form")
     domains = tuple(normal_domain(v) for v in value)
     if None in domains:
         raise _invalid("suppress has an entry that is no plain domain")
@@ -262,6 +268,8 @@ def _caps(value) -> dict:
 def _keep(value) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
         raise _invalid("keep must be a list of addresses and @domains")
+    if any(_IDNA_2003_CHANGES & set(v) for v in value):
+        raise _invalid("keep has a domain that needs its xn-- form")
     try:
         parse_keep(value)
     except ValueError:

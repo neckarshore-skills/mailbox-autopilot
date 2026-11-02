@@ -51,6 +51,8 @@ def test_no_send_code_in_the_built_wheel(tmp_path):
         capture_output=True,
     )
     (wheel,) = tmp_path.glob("*.whl")
+    with zipfile.ZipFile(wheel) as z:  # data the host refuses to start without
+        assert "mailbox_cleanup/public_suffix.dat" in z.namelist()
     offenders, scanned = [], 0
     with zipfile.ZipFile(wheel) as zf:
         for name in zf.namelist():

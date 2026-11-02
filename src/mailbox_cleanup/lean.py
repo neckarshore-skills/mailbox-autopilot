@@ -20,12 +20,14 @@ authserv-id and the suppressed domains, and validates its arguments before it ge
 from __future__ import annotations
 
 import datetime
+import functools
 import re
 from collections.abc import Iterable, Sequence
 from email.message import Message
 from email.parser import HeaderParser
 from email.policy import compat32
 from email.utils import getaddresses
+from importlib import resources
 
 from .classify import classify
 from .guards import _BARE_ADDRESS_RE
@@ -60,6 +62,7 @@ MAX_HEADER = 8192  # a longer value than this is no sender and no verdict
 
 SEARCH_SCAN_MAX = 1000  # UIDs one search looks through to fill its page
 INVALID_SENDER = "invalid"  # no host name has one label, so this cannot be a domain
+SUFFIX_FILE = "public_suffix.dat"  # package data, root-owned with the package (L3)
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _LABEL = r"(?!-)[a-z0-9-]{1,63}(?<!-)"
@@ -78,12 +81,63 @@ def parse_headers(raw: bytes) -> Message:
 
 def normal_domain(value: str) -> str | None:
     """Lower-case ASCII with punycode for anything else, so a lookalike in another script
-    shows as what it is; None unless the result is a plain host name."""
+    shows as what it is; None unless the result is a plain host name. The last label must
+    hold a letter, so a numeric host such as an IP address is none (no IP leaves the host).
+
+    This is Python's IDNA 2003 codec: it maps `ß` to `ss`. A sender's domain can only be
+    misread into a neighbour by that; a list entry is refused in `profile` instead."""
     try:
         ace = value.encode("idna").decode("ascii").lower()
     except UnicodeError:
         return None
-    return ace if len(ace) <= 253 and _DOMAIN_RE.fullmatch(ace) else None
+    if len(ace) > 253 or not _DOMAIN_RE.fullmatch(ace):
+        return None
+    return ace if any(c.isalpha() for c in ace.rpartition(".")[2]) else None
+
+
+@functools.lru_cache(maxsize=1)
+def load_suffix_rules() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """The vendored Public Suffix List: plain rules, wildcard parents, exceptions. The host
+    reads a file that came with the package and goes to no network. It ages, and a suffix
+    it does not know yet costs digest quality only, so it is bumped with a release."""
+    text = resources.files(__package__).joinpath(SUFFIX_FILE).read_text(encoding="ascii")
+    plain, wild, exceptions = set(), set(), set()
+    for line in text.splitlines():
+        if line.startswith("!"):
+            exceptions.add(line[1:])
+        elif line.startswith("*."):
+            wild.add(line[2:])
+        elif line and not line.startswith("//"):
+            plain.add(line)
+    return frozenset(plain), frozenset(wild), frozenset(exceptions)
+
+
+def registrable_domain(domain: str) -> str:
+    """The registrable domain of a normalised domain, by the Public Suffix List algorithm:
+    the longest matching rule, an exception first, and otherwise the last label is the
+    suffix. Everything left of it goes, so one label of what a sender wrote reaches the
+    model, and not a tenant's or a person's name in a subdomain. The input of a domain
+    that is itself a suffix comes back as it is."""
+    plain, wild, exceptions = load_suffix_rules()
+    labels = domain.split(".")
+    suffix = 1
+    for i in range(len(labels)):
+        candidate = ".".join(labels[i:])
+        if candidate in exceptions:
+            suffix = len(labels) - i - 1
+            break
+        if candidate in plain or ".".join(labels[i + 1 :]) in wild:
+            suffix = len(labels) - i
+            break
+    return ".".join(labels[-(suffix + 1) :])
+
+
+def _forms(domain: str) -> set[str]:
+    """A listed domain as it can stand in a raw From: its ASCII and its Unicode form."""
+    try:
+        return {domain, domain.encode("ascii").decode("idna")}
+    except UnicodeError:
+        return {domain}
 
 
 def _ascii_address(address: str) -> str:
@@ -170,13 +224,22 @@ class Lean:
         )
         self._authserv_id = authserv_id
         self._suppress = tuple(suppress)
+        self._suppress_names = tuple(sorted({n for d in self._suppress for n in _forms(d)}))
+        load_suffix_rules()  # a host that cannot cut a domain does not start
 
-    def _suppressed(self, sender: str | None) -> bool:
-        """A listed domain and its subdomains, as the keep list matches: hiding too much
-        is the safe direction. A sender that cannot be read is not suppressed, and its
-        record names no domain."""
-        domain = sender.rpartition("@")[2] if sender else ""
-        return any(domain == d or domain.endswith("." + d) for d in self._suppress)
+    def _suppressed(self, sender: str | None, msg: Message) -> bool:
+        """A listed domain and its subdomains, compared on the full domain, as the keep
+        list matches: hiding too much is the safe direction.
+
+        A From the parser cannot read is searched as text for a listed name, because the
+        condition says the host returns nothing. An unreadable From of anybody else stays
+        visible: hiding those would hand any sender a way out of the digest. What stays is
+        an address hidden in an encoded word, and that record names no domain."""
+        if sender:
+            domain = sender.rpartition("@")[2]
+            return any(domain == d or domain.endswith("." + d) for d in self._suppress)
+        raw = " ".join(msg.get_all("from") or ()).lower()
+        return any(name in raw for name in self._suppress_names)
 
     def verdicts(self, msg: Message) -> dict:
         """DKIM, DMARC and SPF from the topmost Authentication-Results, and only when the
@@ -209,7 +272,7 @@ class Lean:
         """The lean record, or None for a mail from a suppressed domain."""
         msg = parse_headers(row.header)
         sender = _sender(msg)
-        if self._suppressed(sender):
+        if self._suppressed(sender, msg):
             return None
         unsubscribe = msg.get("list-unsubscribe") is not None
         categories = classify(
@@ -228,7 +291,9 @@ class Lean:
             "has_list_unsubscribe": unsubscribe,
             "keep_hit": _is_kept(sender, *self._keep) if sender else None,
             "precedence": _word(msg.get("precedence"), PRECEDENCE),
-            "sender_domain": sender.rpartition("@")[2] if sender else INVALID_SENDER,
+            "sender_domain": (
+                registrable_domain(sender.rpartition("@")[2]) if sender else INVALID_SENDER
+            ),
             "size": _size(row.size),
             "uid": row.uid,
         }

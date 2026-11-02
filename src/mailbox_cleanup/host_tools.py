@@ -36,6 +36,7 @@ from .lean import SIZE_BUCKETS, Lean, search_criteria
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 20
 INBOX = "INBOX"
+IMAP_TIMEOUT_SECONDS = 30  # a stalled server ends the call, not only the L12 wall clock
 _DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _SEARCH_ARGS = frozenset({"flagged", "limit", "since", "size", "unseen"})
 _READ_ARGS = frozenset({"uid"})
@@ -147,9 +148,12 @@ def read_password(email: str) -> str:
 def _inbox(creds: Credentials):
     """One connection for one call, with the INBOX open read-only.
 
-    `max_retries=0`: the next run is the retry. There is no sleep inside a tool call, and
-    a revoked password cannot lock the account three logins at a time."""
-    with imap_connect(creds, ssl=True, max_retries=0, select_inbox=False) as mb:
+    `max_retries=0`: the next run is the retry, so there is no sleep inside a tool call. A
+    failed connection also ends the session (`Host.call`), so a revoked password is one
+    login a run, not one a call."""
+    with imap_connect(
+        creds, ssl=True, max_retries=0, select_inbox=False, timeout=IMAP_TIMEOUT_SECONDS
+    ) as mb:
         mb.folder.set(INBOX, readonly=True)
         yield mb
 
@@ -168,9 +172,12 @@ def _schema(properties: dict, required: list[str] | None = None) -> dict:
 
 def build(p) -> dict[str, Tool]:
     """The tools for this profile: the two names of release 1. Raises GuardRefused when
-    the password cannot be read, so the host refuses to start."""
+    the password or the suffix list cannot be read, so the host refuses to start."""
     creds = Credentials(email=p.email, password=read_password(p.email), server=p.server)
-    lean = Lean(keep=p.keep, authserv_id=p.authserv_id, suppress=p.suppress)
+    try:
+        lean = Lean(keep=p.keep, authserv_id=p.authserv_id, suppress=p.suppress)
+    except (OSError, ValueError):
+        raise _refuse("suffix_list_unavailable", "the public suffix list is missing") from None
 
     def search(args: dict) -> dict:
         _only(args, _SEARCH_ARGS, _REFUSED_CRITERIA)

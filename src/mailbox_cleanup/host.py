@@ -40,6 +40,7 @@ from pathlib import Path
 
 from . import __version__, host_tools, profile
 from .guards import GuardRefused, check_no_symlink_component, check_uids, open_append_only
+from .imap_client import IMAPConnectionError
 from .mcp_stdio import StdioServer
 from .profile import ProfileRefused
 
@@ -93,6 +94,7 @@ KNOWN_NAMES = ALLOWED_TOOLS | DEFERRED_TOOLS | EXCLUDED_TOOLS
 # finding 5, and his read of the cut, contract 8.
 CALL_BUDGET = 50
 REFUSAL_BUDGET = 20
+CONNECTION_EXIT = 2  # README, exit codes
 # What a record may say. `rule`, `action`, `result` and `error_code` are program constants
 # by contract; this holds the contract, so one formatted rule cannot put a folder name
 # into a log that promises to carry no value (James on #94, finding 2).
@@ -182,10 +184,18 @@ class Host:
         self.tools = dict(tools)
         self.calls = 0
         self.refusals = 0
+        self.connection_failed = False
 
     @property
-    def exhausted(self) -> bool:
-        return self.calls >= CALL_BUDGET or self.refusals >= REFUSAL_BUDGET
+    def stop_rule(self) -> str | None:
+        """Why this session ends now, or None. A failed connection ends it because the
+        next run is the retry: after a revoke, a retrying model would otherwise reach the
+        call budget in failed logins, every run (James on #96, finding 5)."""
+        if self.connection_failed:
+            return "connection_failed"
+        if self.calls >= CALL_BUDGET or self.refusals >= REFUSAL_BUDGET:
+            return "session_budget"
+        return None
 
     def list_tools(self) -> list[dict]:
         return [self.tools[n].spec for n in sorted(self.tools)]
@@ -225,12 +235,17 @@ class Host:
         except GuardRefused as e:
             return self._refused(name, e)
         except Exception as e:
+            rule = {}
+            if isinstance(e, IMAPConnectionError):
+                self.connection_failed = True
+                rule = {"rule": "connection_failed"}
             try:
                 self._record(
                     name,
                     result="error",
                     error_code="operation_error",
                     exception=type(e).__name__,
+                    **rule,
                 )
             except GuardRefused:
                 pass
@@ -286,17 +301,21 @@ def run(inp, out, *, uid: int) -> int:
         version=__version__,
         tools=h.list_tools,
         call=h.call,
-        stop=lambda: h.exhausted,
+        stop=lambda: h.stop_rule is not None,
     )
     server.serve(inp, out)
-    stopped = {"result": "ok"}
-    if h.exhausted:
-        stopped = {"result": "refused", "error_code": "profile_refused", "rule": "session_budget"}
+    stopped, code = {"result": "ok"}, 0
+    if h.stop_rule == "session_budget":
+        stopped = {"result": "refused", "error_code": "profile_refused", "rule": h.stop_rule}
+        code = profile.REFUSED_EXIT
+    elif h.stop_rule == "connection_failed":
+        stopped = {"result": "error", "error_code": "operation_error", "rule": h.stop_rule}
+        code = CONNECTION_EXIT
     try:
         audit.write(event="stop", **stopped)
     except GuardRefused:
         pass
-    return profile.REFUSED_EXIT if h.exhausted else 0
+    return code
 
 
 def main() -> int:

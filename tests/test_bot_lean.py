@@ -63,11 +63,12 @@ def imap(install, monkeypatch):
     """The whole path below the host is real, down to `imap_client`'s choice of class."""
     _write_profile()
     fake = FakeImap(folders={"INBOX": dict(MAILS)})
-    fake.opens, fake.logins, fake.keychain = [], [], []
+    fake.opens, fake.logins, fake.keychain, fake.timeouts = [], [], [], []
 
     class Box:
-        def __init__(self, server, port, ssl_context):
+        def __init__(self, server, port, ssl_context, timeout=None):
             fake.opens.append((server, port, ssl_context))
+            fake.timeouts.append(timeout)
 
         def login(self, email, password, initial_folder="INBOX"):
             fake.logins.append((email, password))
@@ -214,7 +215,7 @@ DRIVER = textwrap.dedent("""
     macos.Keyring.get_password = lambda self, s, n: "app-password"
 
     class Box:
-        def __init__(self, server, port, ssl_context):
+        def __init__(self, server, port, ssl_context, timeout=None):
             self.folder = SimpleNamespace(
                 set=lambda name, readonly=False: None,
             )
@@ -571,6 +572,11 @@ def test_a_hostile_authentication_verdict_and_header_values_become_closed_words(
         (b"a@exa_mple.org", "invalid"),
         (b"a@-bad.example", "invalid"),
         (b"a@[192.0.2.1]", "invalid"),
+        (b"a@192.168.1.1", "invalid"),
+        (b"a@1.2.3.4.5", "invalid"),
+        (b"a@mail.sender.example", "sender.example"),
+        (b"a@max-mustermann.kunde4711.mailer.example.com", "example.com"),
+        (b"a@ignore-previous-instructions.example.com", "example.com"),
         (b"a@" + b"x" * 70 + b".example", "invalid"),
         (b"a@" + b"x." * 200 + b"example", "invalid"),
         (b"", "invalid"),
@@ -594,6 +600,45 @@ def test_a_mail_without_any_lean_header_is_still_a_row(imap):
     row = _ok("read", {"uid": "8"})["messages"][0]
     assert row["sender_domain"] == "invalid"
     assert row["date"] is None and row["size"] == "small"
+
+
+@pytest.mark.parametrize(
+    "domain, registrable",
+    [
+        ("example.com", "example.com"),
+        ("a.b.example.com", "example.com"),
+        ("example.co.uk", "example.co.uk"),
+        ("a.example.co.uk", "example.co.uk"),
+        ("co.uk", "co.uk"),  # a domain that is itself a suffix comes back as it is
+        ("foo.bar.ck", "foo.bar.ck"),  # *.ck
+        ("a.foo.bar.ck", "foo.bar.ck"),
+        ("www.ck", "www.ck"),  # !www.ck
+        ("a.www.ck", "www.ck"),
+        ("unknown.tld-nobody-has", "unknown.tld-nobody-has"),
+        ("a.unknown.tld-nobody-has", "unknown.tld-nobody-has"),
+        ("xn--bcher-kva.example", "xn--bcher-kva.example"),
+        ("a.xn--80aswg.xn--p1ai", "xn--80aswg.xn--p1ai"),  # an internationalised suffix
+    ],
+)
+def test_the_sender_domain_is_cut_to_the_registrable_domain(domain, registrable):
+    """James on #96, finding 3: the last free-text field becomes one label."""
+    assert lean.registrable_domain(domain) == registrable
+
+
+def test_a_tenant_name_under_a_private_suffix_does_not_survive():
+    """The private section of the list is left out on purpose: `github.io` there would
+    make the customer's name the registrable domain."""
+    assert lean.registrable_domain("max-mustermann.github.io") == "github.io"
+
+
+def test_a_host_without_the_suffix_list_does_not_serve(imap, install, monkeypatch, capsys):
+    def gone():
+        raise FileNotFoundError("public_suffix.dat")
+
+    monkeypatch.setattr(lean, "load_suffix_rules", gone)
+    rc, answers = _serve({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+    assert (rc, answers) == (6, {})
+    assert _records(install)[-1]["rule"] == "suffix_list_unavailable"
 
 
 # --- Authentication-Results: only the receiving server's own --------------------------
@@ -767,6 +812,72 @@ def test_an_internationalised_keep_entry_matches_its_mail(imap):
     assert _ok("search")["messages"][0]["keep_hit"] is True
 
 
+@pytest.mark.parametrize(
+    "from_lines",
+    [
+        b"From: Praxis Dr. Meier, Berlin <info@klinik.example>\r\n",
+        b"From: a@klinik.example\r\nFrom: b@other.example\r\n",
+        b"From: b@other.example\r\nFrom: a@klinik.example\r\n",
+        b"From: info@klinik.example, b@other.example\r\n",
+        b'From: "dr meier"@klinik.example\r\n',
+        b"From: info@klinik.example.\r\n",
+        b"From: " + b"x" * 9000 + b" <info@klinik.example>\r\n",
+        b"From: INFO@KLINIK.EXAMPLE, b@other.example\r\n",
+    ],
+    ids=[
+        "comma",
+        "two-headers",
+        "two-headers-listed-second",
+        "two-addresses",
+        "quoted-local",
+        "dot",
+        "long",
+        "case",
+    ],
+)
+def test_a_listed_domain_with_an_unreadable_from_returns_nothing(clinic, from_lines):
+    """James on #96, finding 1: the parser gives up on these, the condition does not."""
+    clinic.folders["INBOX"] = {1: Mail(from_lines)}
+    assert _ok("read", {"uid": "1"})["count"] == 0
+    assert _ok("search")["count"] == 0
+
+
+def test_an_unreadable_from_naming_a_listed_unicode_domain_returns_nothing(clinic):
+    _write_profile(suppress=["bücher.example"])
+    clinic.folders["INBOX"] = {
+        1: Mail("From: Laden, Berlin <a@bücher.example>\r\n".encode()),
+        2: Mail(b"From: Laden, Berlin <a@xn--bcher-kva.example>\r\n"),
+    }
+    assert _ok("search")["count"] == 0
+
+
+def test_an_unreadable_from_of_anybody_else_stays_visible(clinic):
+    """Hiding every unreadable sender would hand any sender a way out of the digest."""
+    clinic.folders["INBOX"] = {1: Mail(b"From: Laden, Berlin <a@other.example>\r\n")}
+    assert _ok("search")["messages"][0]["sender_domain"] == "invalid"
+
+
+def test_a_suppressed_mail_is_compared_by_its_full_domain_not_the_cut_one(imap):
+    _write_profile(suppress=["labor.klinik.example"])
+    imap.folders["INBOX"] = {
+        1: Mail(b"From: a@labor.klinik.example\r\n"),
+        2: Mail(b"From: a@klinik.example\r\n"),
+    }
+    assert _uids(_ok("search")) == ["2"]
+
+
+def test_an_address_hidden_in_an_encoded_word_names_no_domain(clinic):
+    """The one shape left: the sender hides the address on purpose, and the record still
+    names nothing of the listed domain."""
+    clinic.folders["INBOX"] = {1: Mail(b"From: =?utf-8?b?aW5mb0BrbGluaWsuZXhhbXBsZQ==?=\r\n")}
+    assert _ok("search")["messages"][0]["sender_domain"] == "invalid"
+
+
+def test_an_encoded_word_that_shows_a_listed_name_returns_nothing(clinic):
+    clinic.folders["INBOX"] = {1: Mail(b"From: =?utf-8?q?info=40klinik.example?=\r\n")}
+    assert _ok("search")["count"] == 0
+
+
 def test_a_lookalike_of_a_listed_domain_is_not_listed(clinic):
     clinic.folders["INBOX"] = {
         1: Mail(b"From: a@notklinik.example\r\n"),
@@ -810,6 +921,44 @@ def test_a_connection_failure_returns_no_detail_and_names_only_its_class(
     rec = _records(install)[1]
     assert (rec["result"], rec["exception"]) == ("error", "IMAPConnectionError")
     assert "example" not in install.read_text(encoding="utf-8")
+
+
+def test_a_failed_login_ends_the_session(imap, install, monkeypatch):
+    """James on #96, finding 5: after a revoke, the kill switch, a retrying model would
+    otherwise reach 50 failed logins a run. The next run is the retry."""
+    tries = []
+
+    def refused(self, email, password, initial_folder="INBOX"):
+        tries.append(email)
+        raise OSError("no")
+
+    monkeypatch.setattr(imap_client.MailBox, "login", refused)
+    rc, answers = _serve(_call("search"), _call("search", id=3))
+    assert rc == 2 and len(tries) == 1
+    assert 2 in answers and 3 not in answers
+    call = _records(install)[-2]
+    assert (call["event"], call["rule"]) == ("call", "connection_failed")
+    stop = _records(install)[-1]
+    assert (stop["event"], stop["result"], stop["error_code"], stop["rule"]) == (
+        "stop",
+        "error",
+        "operation_error",
+        "connection_failed",
+    )
+
+
+def test_an_operation_error_after_the_login_does_not_end_the_session(imap, monkeypatch):
+    def broken(self, *a):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(lean.Lean, "search", broken)
+    rc, answers = _serve(_call("search"), _call("read", {"uid": "5"}, id=3))
+    assert rc == 0 and answers[3]["result"]["isError"] is False
+
+
+def test_a_stalled_server_ends_the_call(imap):
+    _ok("search")
+    assert imap.timeouts == [host_tools.IMAP_TIMEOUT_SECONDS]
 
 
 def test_a_failed_login_is_not_retried_inside_a_call(imap, monkeypatch):
