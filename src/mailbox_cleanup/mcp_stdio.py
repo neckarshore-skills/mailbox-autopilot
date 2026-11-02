@@ -67,10 +67,12 @@ class StdioServer:
         version: str,
         tools: Callable[[], list[dict]],
         call: Callable[[object, object], dict],
+        stop: Callable[[], bool] = lambda: False,
     ):
         self._info = {"name": name, "version": version}
         self._tools = tools
         self._call = call
+        self._stop = stop
         self._initialized = False
 
     # one message ---------------------------------------------------------------------
@@ -156,3 +158,5 @@ class StdioServer:
                     out.flush()
                 except BrokenPipeError:
                     return  # the client went away; that ends the session, not the host
+            if self._stop():
+                return

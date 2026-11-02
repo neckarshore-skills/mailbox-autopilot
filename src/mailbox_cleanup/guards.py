@@ -311,6 +311,17 @@ class FolderView:
             raise _refuse("source_forbidden", "no move out of trash, junk, sent, drafts or all")
         return f.name
 
+    def check_readable(self, name) -> str:
+        """The bot reads where it may move from: INBOX and the namespace. One rule and one
+        message for every refusal, so a read cannot tell a folder that exists from one
+        that does not, and the LIST result stays inside (section 2.7)."""
+        try:
+            return self.check_source(name)
+        except GuardRefused:
+            raise _refuse(
+                "folder_not_readable", "the bot reads INBOX and its namespace only"
+            ) from None
+
     def check_new_folder(self, name) -> str:
         check_folder_name(name)
         if not self.in_namespace(name):

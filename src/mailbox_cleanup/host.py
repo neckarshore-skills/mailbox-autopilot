@@ -19,8 +19,11 @@ Every `tools/call` takes the same path, in this order (section 5.7):
 The audit carries no argument and no value. A tool name is recorded only if this program
 knows it; anything else is "unknown", because the name is model-chosen text.
 
-Slice 3c-1 builds the host and its refusal path; it offers no tool yet. The tools come
-in the next slices, each through `build_tools`, each on this path.
+Release 1 is a read-only bot (owner decision 2026-11-02, #76): the host offers `search`,
+`read` and `thread`, built in `host_tools`, and no write tool can be installed.
+
+A session that collects REFUSAL_BUDGET refusals ends: a burst of refused calls is what an
+injection looks like from the outside (section 5.4), and the host acts on it.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, profile
+from . import __version__, host_tools, profile
 from .guards import GuardRefused, check_no_symlink_component, open_append_only
 from .mcp_stdio import StdioServer
 from .profile import ProfileRefused
@@ -42,25 +45,11 @@ from .profile import ProfileRefused
 HOST_AUDIT_NAME = "host-audit.log"  # in profile.ANCHOR_DIR, provisioned by root
 SERVER_NAME = "mailbox-autopilot"
 
-# The tools the bot profile offers, by the names of section 2.2. `move` and `flag` are
-# each a preview and an apply, because the apply takes no UIDs: it gets them from the
-# preview's token (section 3d). Acceptance 5b pins this list.
-ALLOWED_TOOLS = frozenset(
-    {
-        "create-folder",
-        "draft",
-        "flag-apply",
-        "flag-preview",
-        "move-apply",
-        "move-preview",
-        "read",
-        "search",
-        "thread",
-    }
-)
-# What the profile excludes (section 2.3), by the CLI's names. Refused like any unknown
-# name, but recorded under its own name: a burst of `delete` is what an injection looks
-# like from the outside (section 5.4).
+# What release 1 offers (owner decision 2026-11-02). Acceptance 5b pins this list.
+ALLOWED_TOOLS = frozenset({"read", "search", "thread"})
+# What the profile excludes (section 2.3), by the CLI's names, and the writes of the later
+# stage. Refused like any unknown name, but recorded under its own name: a burst of
+# `delete` is what an injection looks like from the outside (section 5.4).
 EXCLUDED_TOOLS = frozenset(
     {
         "archive",
@@ -69,8 +58,16 @@ EXCLUDED_TOOLS = frozenset(
         "bounces",
         "compose",
         "config",
+        "create-folder",
         "dedupe",
         "delete",
+        "draft",
+        "flag",
+        "flag-apply",
+        "flag-preview",
+        "move",
+        "move-apply",
+        "move-preview",
         "outbox",
         "playbook",
         "playbooks",
@@ -81,6 +78,7 @@ EXCLUDED_TOOLS = frozenset(
     }
 )
 KNOWN_NAMES = ALLOWED_TOOLS | EXCLUDED_TOOLS
+REFUSAL_BUDGET = 20  # James on #94, finding 5; a well-behaved run stays far below it
 # What a record may say. `rule`, `action`, `result` and `error_code` are program constants
 # by contract; this holds the contract, so one formatted rule cannot put a folder name
 # into a log that promises to carry no value (James on #94, finding 2).
@@ -159,18 +157,26 @@ class Host:
         self.profile = profile
         self.audit = audit
         self.tools = dict(tools)
+        self.refusals = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.refusals >= REFUSAL_BUDGET
 
     def list_tools(self) -> list[dict]:
         return [self.tools[n].spec for n in sorted(self.tools)]
 
-    def _record(self, name, *, exception=None, **tokens) -> None:
+    def _record(self, name, *, exception=None, count=None, **tokens) -> None:
         known = name if type(name) is str and name in KNOWN_NAMES else "unknown"
         fields = {k: _shaped(v, _TOKEN_RE) for k, v in tokens.items()}
         if exception is not None:
             fields["exception"] = _shaped(exception, _CLASS_RE)
+        if type(count) is int:
+            fields["count"] = count
         self.audit.write(event="call", tool=known, **fields)
 
     def _refused(self, name, e: GuardRefused) -> dict:
+        self.refusals += 1
         try:
             self._record(name, result="refused", **e.audit_fields())
         except GuardRefused:
@@ -189,7 +195,8 @@ class Host:
             return self._refused(name, _refusal("arguments_invalid", "arguments must be an object"))
         try:
             # built before the record: an ok line means a result exists (James on #94)
-            result = _result(tool.run(arguments), error=False)
+            payload = tool.run(arguments)
+            result = _result(payload, error=False)
         except GuardRefused as e:
             return self._refused(name, e)
         except Exception as e:
@@ -206,15 +213,14 @@ class Host:
                 {"error_code": "operation_error", "message": "the operation failed"}, error=True
             )
         try:
-            self._record(name, result="ok")
+            self._record(name, result="ok", count=payload.get("count"))
         except GuardRefused as e:
             return _error_result(e)  # no record, no data
         return result
 
 
 def build_tools(p) -> dict:
-    """The tools for this profile. None yet: slice 3c-1 builds the host only."""
-    return {}
+    return host_tools.build(p)
 
 
 def _say(message: str) -> None:
@@ -245,14 +251,22 @@ def run(inp, out, *, uid: int) -> int:
     except GuardRefused as e:
         _say(f"refused: {e.rule}")
         return profile.REFUSED_EXIT
-    StdioServer(name=SERVER_NAME, version=__version__, tools=h.list_tools, call=h.call).serve(
-        inp, out
+    server = StdioServer(
+        name=SERVER_NAME,
+        version=__version__,
+        tools=h.list_tools,
+        call=h.call,
+        stop=lambda: h.exhausted,
     )
+    server.serve(inp, out)
+    stopped = {"result": "ok"}
+    if h.exhausted:
+        stopped = {"result": "refused", "error_code": "profile_refused", "rule": "refusal_budget"}
     try:
-        audit.write(event="stop", result="ok")
+        audit.write(event="stop", **stopped)
     except GuardRefused:
         pass
-    return 0
+    return profile.REFUSED_EXIT if h.exhausted else 0
 
 
 def main() -> int:

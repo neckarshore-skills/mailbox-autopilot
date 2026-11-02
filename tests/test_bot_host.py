@@ -38,6 +38,8 @@ def _profile_doc(**over):
         "owner_targets": [],
         "caps": {"per_run": _caps(5), "per_day": _caps(0)},
         "keep": [],
+        "authserv_id": None,
+        "suppress": [],
     }
     doc.update(over)
     return doc
@@ -105,7 +107,7 @@ def _payload(answer) -> dict:
 def test_the_host_serves_the_bot_and_records_its_start(install):
     rc, answers = _serve({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     assert rc == 0
-    assert answers[3]["result"] == {"tools": []}  # 3c-1 builds no tool yet
+    assert [t["name"] for t in answers[3]["result"]["tools"]] == ["read", "search", "thread"]
     start = _records(install)[0]
     assert start["event"] == "start" and start["result"] == "ok"
     assert start["caller_uid"] == os.getuid() and start["profile"] is True
@@ -225,7 +227,8 @@ def test_an_unknown_tool_name_is_recorded_as_unknown(install, name):
     assert _records(install)[1]["tool"] == "unknown"
 
 
-def test_every_excluded_command_is_refused_under_its_own_name(install):
+def test_every_excluded_command_is_refused_under_its_own_name(install, monkeypatch):
+    monkeypatch.setattr(host, "REFUSAL_BUDGET", 1000)
     names = sorted(host.EXCLUDED_TOOLS)
     _serve(*(_call(n, id=10 + i) for i, n in enumerate(names)))
     calls = [r for r in _records(install) if r["event"] == "call"]
@@ -287,20 +290,9 @@ def test_no_argument_value_reaches_the_audit_log_on_the_ok_path(install):
     assert "arguments" not in _records(install)[-1]
 
 
-def test_the_allowlist_carries_the_tickets_names_with_move_and_flag_split():
-    """#76 section 2.2 by name; move and flag are each a preview and an apply, because
-    the apply takes no UIDs. Acceptance 5b pins this list."""
-    assert host.ALLOWED_TOOLS == {
-        "create-folder",
-        "draft",
-        "flag-apply",
-        "flag-preview",
-        "move-apply",
-        "move-preview",
-        "read",
-        "search",
-        "thread",
-    }
+def test_the_allowlist_is_release_1_a_read_only_bot():
+    """Owner decision 2026-11-02 on #76. Acceptance 5b pins this list."""
+    assert host.ALLOWED_TOOLS == {"read", "search", "thread"}
 
 
 def test_a_tool_outside_the_allowlist_cannot_be_installed(install):
