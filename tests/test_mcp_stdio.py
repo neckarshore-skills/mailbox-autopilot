@@ -145,6 +145,16 @@ def test_an_exception_in_the_host_is_an_internal_error_without_detail():
     assert "secret" not in json.dumps(r)
 
 
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), b"bytes"], ids=repr)
+def test_a_result_that_is_not_json_is_an_internal_error(value):
+    """James on #94, finding 1: Infinity and NaN are not JSON, and a strict client would
+    drop the whole frame. Nothing else in the session may depend on that."""
+    s = _server(Recorder(result={"x": value}))
+    _init(s)
+    r = _call(s)
+    assert r["error"]["code"] == m.INTERNAL_ERROR
+
+
 # --- JSON-RPC shape ------------------------------------------------------------------
 
 

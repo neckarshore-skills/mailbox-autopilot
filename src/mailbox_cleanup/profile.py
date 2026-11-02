@@ -110,8 +110,11 @@ def _caller_gids() -> set[int]:
     return set(os.getgroups()) | {os.getgid(), os.getegid()}
 
 
-def _user_name(uid: int) -> str:
-    return pwd.getpwuid(uid).pw_name
+def _user_name(uid: int) -> str | None:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None  # no passwd entry: nobody's name, so no member by name
 
 
 def _home_of(uid: int) -> Path:
@@ -253,16 +256,20 @@ def load_profile() -> Profile:
             raise ProfileRefused("anchor_insecure", "the anchor directory is not root-only")
     except FileNotFoundError:
         raise ProfileRefused("profile_not_installed", "no bot profile is installed") from None
+    except OSError:
+        raise ProfileRefused("anchor_unreadable", "the anchor cannot be read") from None
     path = ANCHOR_DIR / PROFILE_NAME
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         raise ProfileRefused("profile_missing", "the anchor holds no profile") from None
+    except OSError:
+        raise ProfileRefused("anchor_unreadable", "the anchor cannot be read") from None
     if not _root_only_file(st):
         raise ProfileRefused("profile_insecure", "the profile is not a root-only regular file")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except PermissionError:
+    except OSError:
         raise ProfileRefused("profile_unreadable", "the profile cannot be read") from None
     try:
         # the same check on the opened descriptor: what is hashed and parsed is the file

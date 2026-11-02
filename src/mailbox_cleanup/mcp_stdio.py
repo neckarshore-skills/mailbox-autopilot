@@ -47,7 +47,8 @@ def _no_constants(name: str):
 def _frame(obj: dict) -> bytes:
     # ensure_ascii: every non-ASCII character, U+2028 included, travels escaped, so a
     # frame is one line whatever a tool returns
-    return json.dumps(obj, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+    text = json.dumps(obj, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    return text.encode("ascii") + b"\n"
 
 
 def _error(id, code: int, message: str) -> bytes:
@@ -103,7 +104,10 @@ class StdioServer:
             return None  # notifications/initialized, notifications/cancelled, anything
         params = msg.get("params")
         result = self._method(method, params, id)
-        return _frame({"jsonrpc": "2.0", "id": id, "result": result})
+        try:
+            return _frame({"jsonrpc": "2.0", "id": id, "result": result})
+        except (TypeError, ValueError):
+            raise _Invalid(INTERNAL_ERROR, "internal error", id) from None
 
     def _method(self, method: str, params, id) -> dict:
         if method == "ping":

@@ -358,6 +358,47 @@ def test_no_data_leaves_the_host_when_its_audit_line_cannot_be_written(install):
     assert json.loads(result["content"][0]["text"])["rule"] == "audit_log_missing"
 
 
+@pytest.mark.parametrize(
+    "value", [float("inf"), float("nan"), b"bytes", {1, 2}], ids=["inf", "nan", "bytes", "set"]
+)
+def test_a_result_the_host_cannot_serialise_is_an_error_not_an_ok_record(install, value):
+    """James on #94, finding 1: the record is written after the result is built, so the
+    log never says ok for a call that returned nothing, and no frame carries Infinity."""
+    result = _host(install, lambda args: {"x": value}).call("search", {})
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"]) == {
+        "error_code": "operation_error",
+        "message": "the operation failed",
+    }
+    rec = _records(install)[-1]
+    assert (rec["result"], rec["error_code"]) == ("error", "operation_error")
+
+
+@pytest.mark.parametrize(
+    "value", ["Geheim-Projekt", "folder_Geheim Projekt", "x" * 65, "a\nb", ""], ids=repr
+)
+def test_a_rule_that_is_no_program_token_is_recorded_as_unknown(install, value):
+    """James on #94, finding 2: from this slice tools raise their own refusals, and one
+    formatted rule would put a folder name into the log that promises to carry no value."""
+
+    def run(args):
+        raise GuardRefused("profile_refused", value, "refused", action=value)
+
+    _host(install, run).call("search", {})
+    rec = _records(install)[-1]
+    assert (rec["rule"], rec["action"]) == ("unknown", "unknown")
+    assert (rec["result"], rec["error_code"]) == ("refused", "profile_refused")
+
+
+def test_a_crash_is_recorded_by_its_exception_class_only(install):
+    def run(args):
+        raise KeyError("Geheim-Projekt")
+
+    _host(install, run).call("search", {})
+    rec = _records(install)[-1]
+    assert rec["exception"] == "KeyError" and "rule" not in rec
+
+
 # --- the process: stdout carries protocol frames only ---------------------------------
 
 

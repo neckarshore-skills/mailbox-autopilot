@@ -358,6 +358,40 @@ def test_the_host_refuses_every_other_state(anchor, group, setup, rule):
     assert _rule(profile.host_profile, os.getuid()) == rule
 
 
+def test_an_anchor_that_cannot_be_read_is_a_refusal_not_a_crash(anchor, group, monkeypatch):
+    """James on #94, finding 3: the launcher correlates by the start record, and a
+    traceback writes none."""
+    group(members=(ME,))
+    anchor.write()
+
+    def denied(path):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(profile, "_secure_dir", denied)
+    assert _rule(profile.host_profile, os.getuid()) == "anchor_unreadable"
+
+
+def test_a_profile_file_that_cannot_be_stat_ed_is_a_refusal_not_a_crash(anchor, group, monkeypatch):
+    group(members=(ME,))
+    anchor.write()
+    real = os.lstat
+
+    def denied(path, **kw):
+        if str(path).endswith(profile.PROFILE_NAME):
+            raise OSError(5, "input/output error")
+        return real(path, **kw)
+
+    monkeypatch.setattr(profile.os, "lstat", denied)
+    assert _rule(profile.host_profile, os.getuid()) == "anchor_unreadable"
+
+
+def test_a_uid_without_a_passwd_entry_is_not_a_member(group):
+    """Also finding 3: pwd raises KeyError for an unknown uid."""
+    group(members=(ME,))
+    unknown = 2**31 - 7
+    assert _rule(profile.host_profile, unknown) == "not_bot_user"
+
+
 # --- CLI: refused before click parses -------------------------------------------
 
 
