@@ -877,17 +877,17 @@ def test_an_unreadable_from_naming_a_listed_unicode_domain_returns_nothing(clini
 @pytest.mark.parametrize(
     "from_line",
     [
-        "From: Praxis <a@xn--strae-oqa.de>\r\n",
-        "From: Praxis <a@straße.de>\r\n",
-        "From: a@sub.straße.de\r\n",
-        "From: Praxis, Berlin <a@straße.de>\r\n",
+        "From: Praxis <a@xn--strae-oqa.example>\r\n",
+        "From: Praxis <a@straße.example>\r\n",
+        "From: a@sub.straße.example\r\n",
+        "From: Praxis, Berlin <a@straße.example>\r\n",
     ],
     ids=["ascii", "unicode", "subdomain", "unreadable"],
 )
 def test_a_listed_eszett_domain_returns_nothing_however_the_mail_writes_it(clinic, from_line):
-    """James's re-read of #96, N1: the codec would read `straße.de` as `strasse.de`, another
+    """James's re-read of #96, N1: the codec would read `straße` as `strasse`, another
     registration, so the record would name a neighbour."""
-    _write_profile(suppress=["xn--strae-oqa.de"])
+    _write_profile(suppress=["xn--strae-oqa.example"])
     clinic.folders["INBOX"] = {1: Mail(from_line.encode())}
     assert _ok("search")["count"] == 0
 
@@ -895,10 +895,10 @@ def test_a_listed_eszett_domain_returns_nothing_however_the_mail_writes_it(clini
 @pytest.mark.parametrize(
     "value, domain",
     [
-        ("a@straße.de".encode(), "invalid"),
+        ("a@straße.example".encode(), "invalid"),
         ("a@ς.example".encode(), "invalid"),
         ("a@a\u200db.example".encode(), "invalid"),
-        (b"a@strasse.de", "strasse.de"),
+        (b"a@strasse.example", "strasse.example"),
     ],
     ids=["eszett", "final-sigma", "zwj", "the-real-neighbour"],
 )
