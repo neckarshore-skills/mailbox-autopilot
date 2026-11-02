@@ -36,6 +36,8 @@ def _valid(**over):
         "owner_targets": [],
         "caps": {"per_run": _caps(5), "per_day": _caps(0)},
         "keep": ["boss@example.org", "@bank.example"],
+        "authserv_id": "mx.example.org",
+        "suppress": ["klinik.example"],
     }
     doc.update(over)
     return doc
@@ -197,6 +199,18 @@ _V2_INVALID = {
     "keep-not-str": {"keep": [1]},
     # an object iterates as its keys, which parse_keep would accept
     "keep-object": {"keep": {"boss@example.org": True}},
+    "authserv-empty": {"authserv_id": ""},
+    "authserv-not-str": {"authserv_id": 1},
+    "authserv-space": {"authserv_id": "mx example.org"},
+    "authserv-semicolon": {"authserv_id": "mx.example.org;"},
+    "authserv-long": {"authserv_id": "a." * 200 + "org"},
+    "suppress-str": {"suppress": "klinik.example"},
+    "suppress-object": {"suppress": {"klinik.example": True}},
+    "suppress-not-str": {"suppress": [1]},
+    "suppress-at": {"suppress": ["@klinik.example"]},
+    "suppress-address": {"suppress": ["arzt@klinik.example"]},
+    "suppress-bare-word": {"suppress": ["klinik"]},
+    "suppress-wildcard": {"suppress": ["*.klinik.example"]},
 }
 
 
@@ -356,6 +370,11 @@ def test_the_host_refuses_every_other_state(anchor, group, setup, rule):
     if setup.get("raw"):
         anchor.write(raw=setup["raw"])
     assert _rule(profile.host_profile, os.getuid()) == rule
+
+
+def test_suppressed_domains_are_kept_in_the_form_a_mail_is_compared_in(anchor):
+    anchor.write(_valid(suppress=["KLINIK.Example", "bücher.example"]))
+    assert profile.load_profile().suppress == ("klinik.example", "xn--bcher-kva.example")
 
 
 def test_an_anchor_that_cannot_be_read_is_a_refusal_not_a_crash(anchor, group, monkeypatch):

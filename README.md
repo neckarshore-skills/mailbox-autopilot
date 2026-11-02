@@ -322,7 +322,7 @@ jq -s 'group_by(.account + "/" + .subcommand) | map({op: (.[0].account + "/" + .
 
 ## Running as an unattended bot
 
-> **Note:** In progress (#76). This section grows with each slice and lists only what is built. The MCP host runs since slice 3c-1 but offers no tool yet; until its tools and the launcher land, no unattended bot can run.
+> **Note:** In progress (#76). This section grows with each slice and lists only what is built. Release 1 is a read-only bot for the INBOX's metadata (owner decisions 2026-11-02). The MCP host offers `search` and `read`; until the launcher lands, no unattended bot can run, and no real mail reaches a model before the gates in #76 are met.
 
 An unattended bot reads untrusted mail, so its limits come from the tool and from root, never from the bot behaving well. Two root-controlled facts decide what it may do, and neither comes from env, `HOME` or a file the bot can write:
 
@@ -343,9 +343,13 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
     "per_run": {"create_folder": 5, "draft": 5, "flag": 10, "move": 50},
     "per_day": {"create_folder": 0, "draft": 0, "flag": 0, "move": 0}
   },
-  "keep": ["<an address>", "@<a domain>"]
+  "keep": ["<an address>", "@<a domain>"],
+  "authserv_id": null,
+  "suppress": ["<a domain>"]
 }
 ```
+
+`authserv_id` is the name your receiving server writes into `Authentication-Results`, for example `mx.example.org`. While it is `null`, every verdict is `unknown`. `suppress` lists plain domains, for example a clinic's: the host returns nothing about mail from them or their subdomains, as if it were not there. `namespace`, `owner_targets` and `caps` serve the later stage and are read by nothing in release 1.
 
 3. **The host audit log.** `host-audit.log` in the same directory. Root creates it empty, gives it to the bot user with mode `0600` and sets the system append-only flag (`chflags sappend`), so the bot can add lines but cannot truncate, delete or reset it. Without it the MCP host does not start.
 
@@ -358,7 +362,7 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 1 | The CLI refuses every member of the bot group, before click parses anything: unknown commands, `--help` and `--version` included. Exit 6, `profile_refused`, JSON | `cli.py` `_ProfileGuardedGroup.main`, `profile.cli_gate` | `test_the_bot_is_refused_before_click_parses` |
 | 2 | Identity is group membership, whatever state the profile is in | `profile._bot_group`, `profile._is_member` | `test_a_bot_group_member_is_refused_even_without_any_profile`, `test_the_real_group_lookup_recognises_a_member_by_process_gid` |
 | 3 | A profile counts only if parent, directory and file are root-only and the file is a regular file, checked again on the opened descriptor | `profile.load_profile`, `profile._root_only_file` | the `*_insecure` tests, `test_the_opened_file_is_checked_again` |
-| 4 | The schema is strict (version 2): unknown or missing keys, version 1, unknown users, `root`, any read level other than the string `lean`, a server that is not a plain host name (no port, scheme or IP), an address that is not one bare address, invalid folder names, caps that do not name every action class with a count of 0 or more, and keep entries that are no address or `@domain` are refused | `profile._parse` | `test_an_invalid_profile_is_refused`, `test_an_invalid_v2_field_is_refused`, `test_every_v2_key_is_required`, `test_a_v1_profile_is_refused` |
+| 4 | The schema is strict (version 2): unknown or missing keys, version 1, unknown users, `root`, any read level other than the string `lean`, a server that is not a plain host name (no port, scheme or IP), an address that is not one bare address, invalid folder names, caps that do not name every action class with a count of 0 or more, keep entries that are no address or `@domain`, an `authserv_id` that is neither null nor a plain name, and `suppress` entries that are no plain domain are refused | `profile._parse` | `test_an_invalid_profile_is_refused`, `test_an_invalid_v2_field_is_refused`, `test_every_v2_key_is_required`, `test_a_v1_profile_is_refused` |
 | 5 | The MCP host's entry has no unrestricted mode: it returns the profile only to the bot user it names | `profile.host_profile` | `test_the_host_refuses_every_other_state` |
 | 6 | An anchor without the group is an incomplete install: everyone is refused | `profile.cli_gate` | `test_an_anchor_without_the_bot_group_refuses_everyone` |
 | 7 | A refusal is audited in the caller's home from the user database; `HOME` and `MAILBOX_CLEANUP_AUDIT_LOG` cannot move it; no argument is recorded; the refusal does not depend on the write | `audit.log_refusal`, `cli._refuse_for_profile` | `test_the_refusal_record_ignores_home_and_the_audit_override`, `test_the_refusal_does_not_depend_on_the_audit_write` |
@@ -381,7 +385,7 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 19 | The keep list is checked again right before `MOVE` and `STORE`; a sender that cannot be read refuses. A keep-list hit is no proof of the sender: `From` can be spoofed | `guards.ensure_none_kept` | `test_a_kept_sender_refuses_the_whole_request_without_naming_it`, `test_a_sender_that_is_not_one_bare_address_is_refused` |
 | 20 | The bot cannot reset the 24-hour count (#76 D15): the store must be its own one-link file carrying the system append-only flag, which only root sets and clears (`chflags sappend`); the user flag is not enough. Every directory above it is root's or the bot's, and others may write one only if it is sticky, as `/tmp`. A missing store refuses instead of starting a new day. That the flag holds at the target Mac's securelevel is unmeasured until 5b | `guards.open_append_only`, `guards._is_append_only`, `guards._trusted_dir` | `test_a_store_without_the_system_append_only_flag_is_refused`, `test_the_user_append_only_flag_is_not_enough`, `test_a_sticky_directory_owned_by_someone_else_is_not_trusted`, `test_a_deleted_store_refuses_instead_of_starting_a_new_day` |
 
-**The MCP host (slice 3c-1).** `mailbox-autopilot-host` is the bot's only interface: a local MCP server over stdio that calls the library in-process. It offers no tool yet; every tool will take the path below. The allowlist, by the names of #76 section 2.2: `search`, `read`, `thread`, `draft`, `create-folder`, and `move` and `flag` each as a `-preview` and an `-apply`, because the apply takes no UIDs.
+**The MCP host (slice 3c-1).** `mailbox-autopilot-host` is the bot's only interface: a local MCP server over stdio that calls the library in-process. Every tool takes the path below. Release 1 offers `search` and `read`. The names of the later stage (`thread`, `draft`, `create-folder`, and `move` and `flag` each as a `-preview` and an `-apply`) cannot be installed, and each is refused under its own name.
 
 | # | Guarantee | Code | Test (`tests/test_bot_host.py`, `tests/test_mcp_stdio.py`) |
 |---|---|---|---|
@@ -392,6 +396,39 @@ An unattended bot reads untrusted mail, so its limits come from the tool and fro
 | 25 | A result leaves the host only after its audit record is written; a refusal stands even when its record cannot be written | `host.Host.call`, `host.Host._refused` | `test_no_data_leaves_the_host_when_its_audit_line_cannot_be_written`, `test_a_refusal_stands_when_its_audit_line_cannot_be_written` |
 | 26 | Only protocol frames reach stdout; a stray print or a write to fd 1 lands on stderr | `host.main` | `test_a_stray_print_never_reaches_the_protocol_stream` |
 | 27 | A crash in a tool, or deep nesting in a request, returns an error with no detail and does not end the host | `host.Host.call`, `mcp_stdio.StdioServer` | `test_a_crash_inside_a_tool_returns_no_detail`, `test_deep_nesting_is_a_parse_error_not_a_crash`, `test_an_exception_in_the_host_is_an_internal_error_without_detail` |
+| 28 | An ok record means a result exists: it is built first, and Infinity and NaN never reach a frame | `host.Host.call`, `mcp_stdio._frame` | `test_a_result_the_host_cannot_serialise_is_an_error_not_an_ok_record`, `test_a_result_that_is_not_json_is_an_internal_error` |
+| 29 | Every record field has the shape of a program token, so a formatted rule cannot carry a folder name; a crash is recorded by its exception class only | `host.Host._record` | `test_a_rule_that_is_no_program_token_is_recorded_as_unknown`, `test_a_crash_is_recorded_by_its_exception_class_only` |
+| 30 | A session ends after 50 calls or 20 refusals, with exit 6 and a `session_budget` record, and the next call gets no service. That bounds what reaches the model per run, and a burst of refusals is what an injection looks like from the outside | `host.CALL_BUDGET`, `host.REFUSAL_BUDGET`, `host.run` | `test_a_burst_of_refusals_ends_the_session`, `test_good_calls_are_bounded_too`, `test_the_call_past_the_budget_gets_no_service` |
+| 31 | The later stage's tools are not offered and cannot be installed; each is refused under its own audited name | `host.ALLOWED_TOOLS`, `host.DEFERRED_TOOLS` | `test_the_allowlist_is_release_1_a_read_only_bot`, `test_every_later_stage_name_is_refused_under_its_own_name`, `test_a_later_stage_tool_cannot_be_installed` |
+
+**The read tools (slice 3c-2).** Both read the INBOX and return `{"count", "messages", "truncated"}`, and every message is a lean record. No part of a record is text a mail wrote:
+
+| Field | Value |
+|-------|-------|
+| `uid` | the message UID |
+| `sender_domain` | one lower-case domain, punycode for anything else, or `invalid` when From is not one readable address. Never a display name or a local part |
+| `date` | the day the server received the mail, not the `Date` a sender wrote |
+| `size` | `small` (under 100 KiB), `medium` (under 1 MiB), `large` (under 10 MiB) or `huge` |
+| `has_attachment` | by the top-level `Content-Type`: `multipart/mixed`, or one part that is neither text nor multipart. An attachment nested below `multipart/signed` is not seen |
+| `has_list_id`, `has_list_unsubscribe` | true or false. The URL itself is a capability and is never returned |
+| `auto_submitted`, `precedence` | a word from a closed list, `other`, or `null` |
+| `keep_hit` | true or false, or `null` without a readable sender. It is no proof of the sender: `From` can be spoofed |
+| `categories` | any of `automated`, `bounce`, `large_attachment`, `newsletter`. Subject is never fetched, so a bounce is told by its sender |
+| `auth` | `dkim`, `dmarc`, `spf`, each a result word or `unknown`. It is no proof of the sender either: whether the provider removes a forged header from a mail it did not check is unmeasured |
+
+`search` filters on `since` (the server's arrival date, `YYYY-MM-DD`), `unseen` and `flagged` (true or false) and `size` (a bucket name), and takes `limit` (1 to 100, default 20). `read` takes `uid`.
+
+| # | Guarantee | Code | Test (`tests/test_bot_lean.py`) |
+|---|---|---|---|
+| 32 | The password is read once, at host start, from the macOS Keychain by class. `PYTHON_KEYRING_BACKEND`, a `keyringrc.cfg`, `KEYRING_PROPERTY_*` and `KEYCHAIN_PATH` have no say, and no module they name is imported into the host. Without a password the host does not serve: exit 6, `credential_unavailable`, audited, no retry and no fallback | `host_tools._keychain`, `host_tools.read_password` | `test_the_password_comes_from_the_macos_keychain_for_the_profiles_address`, `test_neither_env_nor_a_keyringrc_can_load_a_backend_into_the_host`, `test_keychain_env_switches_do_not_reach_the_backend`, `test_a_host_without_its_password_does_not_serve_and_says_so` |
+| 33 | Address and server come from the profile, never from `auth.get_credentials` with its keychain lookup and its provider fallback. TLS is requested explicitly, so `MAILBOX_CLEANUP_SSL` has no say. A failed login is not retried inside a call | `host_tools.build`, `host_tools._inbox` | `test_server_and_address_come_from_the_profile_never_from_the_auth_lookup`, `test_tls_is_forced_whatever_the_environment_says`, `test_a_failed_login_is_not_retried_inside_a_call` |
+| 34 | Read-only on the wire, INBOX only: login selects nothing, the INBOX is opened with EXAMINE, and only `UID SEARCH` and `UID FETCH` of `BODY.PEEK[HEADER.FIELDS]` are sent. No `LIST`, so the bot learns no folder name. Subject, To, Received and bodies never enter the process | `host_tools._inbox`, `lean.LEAN_HEADERS` | `test_read_only_on_the_wire`, `test_the_process_never_holds_a_header_it_does_not_need` |
+| 35 | Every argument is checked against its own shape before the server is touched. An unknown key is refused, so no parameter asks for another folder or a fuller read. A UID is one plain number | `host_tools._only`, `guards.check_uids` | `test_an_argument_outside_its_shape_is_refused_before_any_connection`, `test_a_uid_that_is_not_one_plain_number_is_refused`, `test_a_number_that_parses_to_infinity_is_refused` |
+| 36 | Search reaches the server on arrival date, flag and size bucket only. Sender, subject, text, header and byte-level size criteria are refused under their own rule: each would be an oracle for a field that is never returned | `lean.search_criteria`, `host_tools._only` | `test_only_date_flag_and_size_criteria_reach_the_server`, `test_a_content_or_address_criterion_is_refused_under_its_own_rule`, `test_size_is_searched_by_bucket_so_it_is_no_oracle_for_the_exact_size` |
+| 37 | Nothing a mail wrote reaches a frame or the audit log: each header becomes a boolean, a closed word, one normalised domain, or nothing | `lean.Lean.record`, `lean.normal_domain` | `test_nothing_a_mail_wrote_reaches_the_frame_or_the_audit_log`, `test_a_hostile_authentication_verdict_and_header_values_become_closed_words`, `test_the_sender_is_one_normalised_domain_or_invalid` |
+| 38 | A verdict is read only from the topmost `Authentication-Results`, only with the profile's `authserv_id`, and text inside a comment or a quoted value is not read. Anything else is `unknown`, never a pass | `lean.Lean.verdicts` | `test_a_verdict_from_another_authserv_id_is_no_verdict`, `test_only_the_topmost_header_counts`, `test_no_authserv_id_in_the_profile_means_no_verdict_at_all`, `test_text_inside_a_comment_or_a_quoted_value_is_no_verdict` |
+| 39 | For a suppressed domain the host returns nothing: a read answers as for a UID that is not there, and a page fills from further back, so a short page does not give it away | `lean.Lean.record`, `lean.Lean.search` | `test_search_returns_nothing_for_a_listed_domain_or_its_subdomains`, `test_a_read_of_a_listed_domain_cannot_be_told_from_a_uid_that_is_not_there`, `test_a_suppressed_mail_does_not_shorten_a_page` |
+| 40 | A read or search is audited with its count and the UIDs it returned, and with no criterion. A failed connection returns no detail and is recorded by its exception class | `host._read_fields`, `host.Host.call` | `test_a_read_is_audited_with_its_uid`, `test_a_search_is_audited_with_what_it_returned_and_no_criterion`, `test_a_connection_failure_returns_no_detail_and_names_only_its_class` |
 
 ## Exit codes and error codes
 

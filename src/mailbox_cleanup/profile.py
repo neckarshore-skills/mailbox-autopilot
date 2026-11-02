@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .guards import ACTION_CLASSES, GuardRefused, check_folder_name
+from .lean import normal_domain
 from .manage.headers import is_bare_address
 from .operations.selection import parse_keep
 
@@ -54,6 +55,8 @@ _KEYS = frozenset(
         "owner_targets",
         "caps",
         "keep",
+        "authserv_id",
+        "suppress",
     }
 )
 _CAP_KEYS = frozenset({"per_run", "per_day"})
@@ -63,6 +66,7 @@ _CAP_KEYS = frozenset({"per_run", "per_day"})
 _LABEL = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
 _SERVER_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})+", re.ASCII)
 MAX_SERVER = 253
+_AUTHSERV_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*", re.ASCII)  # RFC 8601, one name
 
 
 class ProfileRefused(Exception):
@@ -91,6 +95,11 @@ class Profile:
     per_run: dict
     per_day: dict
     keep: tuple[str, ...]
+    # The receiving server's name in Authentication-Results. Null means no verdict is
+    # ever returned: only this server's own header may be believed (#76 section 4.2)
+    authserv_id: str | None
+    # Domains whose mail the host returns nothing about (Dr. Sommer's condition 2 on #76)
+    suppress: tuple[str, ...]
 
 
 # --- system lookups (replaced in tests) -------------------------------------------
@@ -173,6 +182,8 @@ def _parse(data: bytes, sha256: str) -> Profile:
         owner_targets=_owner_targets(doc["owner_targets"]),
         **_caps(doc["caps"]),
         keep=_keep(doc["keep"]),
+        authserv_id=_authserv_id(doc["authserv_id"]),
+        suppress=_suppress(doc["suppress"]),
     )
 
 
@@ -191,6 +202,25 @@ def _server(value) -> str:
     ):
         raise _invalid("server must be a plain host name")
     return value
+
+
+def _authserv_id(value) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > MAX_SERVER or not _AUTHSERV_RE.fullmatch(value):
+        raise _invalid("authserv_id must be a plain host name or null")
+    return value
+
+
+def _suppress(value) -> tuple[str, ...]:
+    """Plain domains, in the form a mail's sender is compared in. A word that is no domain
+    refuses, because the owner would believe it hides something."""
+    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+        raise _invalid("suppress must be a list of domains")
+    domains = tuple(normal_domain(v) for v in value)
+    if None in domains:
+        raise _invalid("suppress has an entry that is no plain domain")
+    return domains
 
 
 def _folder(value, what: str) -> str:

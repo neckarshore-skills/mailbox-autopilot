@@ -13,6 +13,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+import keyring.backends.macOS as macos
 import pytest
 
 from mailbox_cleanup import guards, host, profile
@@ -38,6 +39,8 @@ def _profile_doc(**over):
         "owner_targets": [],
         "caps": {"per_run": _caps(5), "per_day": _caps(0)},
         "keep": [],
+        "authserv_id": None,
+        "suppress": [],
     }
     doc.update(over)
     return doc
@@ -58,6 +61,7 @@ def install(tmp_path, monkeypatch):
     monkeypatch.setattr(profile, "ANCHOR_OWNER_UID", os.getuid())
     monkeypatch.setattr(profile, "_bot_group", lambda: (GID, frozenset({ME})))
     monkeypatch.setattr(guards, "_is_append_only", lambda st: True)
+    monkeypatch.setattr(macos.Keyring, "get_password", lambda self, s, n: "app-password")
     (adir / profile.PROFILE_NAME).write_text(json.dumps(_profile_doc()), encoding="utf-8")
     os.chmod(adir / profile.PROFILE_NAME, 0o644)
     log = adir / host.HOST_AUDIT_NAME
@@ -105,7 +109,7 @@ def _payload(answer) -> dict:
 def test_the_host_serves_the_bot_and_records_its_start(install):
     rc, answers = _serve({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     assert rc == 0
-    assert answers[3]["result"] == {"tools": []}  # 3c-1 builds no tool yet
+    assert [t["name"] for t in answers[3]["result"]["tools"]] == ["read", "search"]
     start = _records(install)[0]
     assert start["event"] == "start" and start["result"] == "ok"
     assert start["caller_uid"] == os.getuid() and start["profile"] is True
