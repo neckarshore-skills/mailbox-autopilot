@@ -1,0 +1,12 @@
+# #76 L6 (D9): the bot user may open outbound TCP to ports 443 (Anthropic API) and 993
+# (IMAPS) only, and nothing reaches it inbound. install.sh copies this file to
+# /etc/pf.anchors/ai.neckarshore.mailbox-autopilot and does NOT touch /etc/pf.conf:
+# loading the anchor is a step on the target Mac with the owner's OK.
+#
+# Unmeasured until the 5b run: that per-user rules hold on the target Mac, and whether the
+# bot's name lookups need a rule (on macOS they usually go through mDNSResponder, which
+# runs as its own user, so no port 53 rule is given here).
+
+pass out quick proto tcp from any to any port { 443, 993 } user mailbox-autopilot-bot keep state
+block drop out quick user mailbox-autopilot-bot
+block drop in quick user mailbox-autopilot-bot

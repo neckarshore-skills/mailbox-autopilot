@@ -374,7 +374,7 @@ def test_leftovers_are_killed_by_the_bot_users_uid(monkeypatch):
 
 
 def test_the_run_file_is_owner_only(tmp_path):
-    with gate.open_run_file(tmp_path / "runs", owner=None) as out:
+    with gate.open_run_file(tmp_path / "runs") as out:
         out.write("x\n")
     (run,) = (tmp_path / "runs").iterdir()
     assert stat.S_IMODE(run.stat().st_mode) == 0o600
