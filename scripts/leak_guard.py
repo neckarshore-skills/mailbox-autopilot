@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,9 +47,11 @@ SYSTEM_ADDRESS_RE = re.compile(
     r"|(?:mailer-daemon|bounce-\d+|noreply)@ionos\.de"
     r"|news@medium\.com"
     r")$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,  # Unicode folding would wave `ſ`, `ı` and U+212A lookalikes through
 )
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost)\b")
+# Unicode word characters: an ASCII class matches nothing in an address with an umlaut in its
+# domain, and this repository's subject is German mail (James on #96, T1).
+EMAIL_RE = re.compile(r"[\w.%+-]+@((?:(?:[^\W_]|-)+\.)+[^\W\d_]{2,}|localhost)\b")
 IBAN_RE = re.compile(r"\b([A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?)\b")
 PHONE_RE = re.compile(
     r"(?<![\w.])(?:\+|00)\d{1,3}"  # + or 00, country code
@@ -320,7 +323,7 @@ def _allowed(path: str, text: str, allow: list[AllowEntry]) -> bool:
 
 
 def _email_allowed(domain: str) -> bool:
-    d = domain.lower()
+    d = unicodedata.normalize("NFKC", domain).casefold()
     return any(d == a or d.endswith("." + a) for a in ALLOWED_EMAIL_DOMAINS)
 
 
@@ -333,9 +336,12 @@ def scan_lines(entries, private_patterns, allow) -> list[Hit]:
     for path, n, line in entries:
         if _allowed(path, line, allow):
             continue
+        # Both forms: `\w` takes no combining mark, so a decomposed domain needs NFKC, and a
+        # hit in either counts, so normalising cannot remove one (James on #98, U1).
         if any(
             not _email_allowed(m.group(1)) and not SYSTEM_ADDRESS_RE.match(m.group(0))
-            for m in EMAIL_RE.finditer(line)
+            for form in {line, unicodedata.normalize("NFKC", line)}
+            for m in EMAIL_RE.finditer(form)
         ):
             hits.append(Hit(path, n, "public", "email"))
         if any(_iban_valid(m.group(1)) for m in IBAN_RE.finditer(line)):

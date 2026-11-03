@@ -36,6 +36,8 @@ def _valid(**over):
         "owner_targets": [],
         "caps": {"per_run": _caps(5), "per_day": _caps(0)},
         "keep": ["boss@example.org", "@bank.example"],
+        "authserv_id": "mx.example.org",
+        "suppress": ["klinik.example"],
     }
     doc.update(over)
     return doc
@@ -197,6 +199,26 @@ _V2_INVALID = {
     "keep-not-str": {"keep": [1]},
     # an object iterates as its keys, which parse_keep would accept
     "keep-object": {"keep": {"boss@example.org": True}},
+    "authserv-empty": {"authserv_id": ""},
+    "authserv-not-str": {"authserv_id": 1},
+    "authserv-space": {"authserv_id": "mx example.org"},
+    "authserv-semicolon": {"authserv_id": "mx.example.org;"},
+    "authserv-long": {"authserv_id": "a." * 200 + "org"},
+    "suppress-str": {"suppress": "klinik.example"},
+    "suppress-object": {"suppress": {"klinik.example": True}},
+    "suppress-not-str": {"suppress": [1]},
+    "suppress-at": {"suppress": ["@klinik.example"]},
+    "suppress-address": {"suppress": ["arzt@klinik.example"]},
+    "suppress-bare-word": {"suppress": ["klinik"]},
+    "suppress-wildcard": {"suppress": ["*.klinik.example"]},
+    "suppress-numeric": {"suppress": ["192.168.1.1"]},
+    "suppress-eszett": {"suppress": ["straße.example"]},
+    "suppress-capital-eszett": {"suppress": ["Straẞe.example"]},
+    "suppress-final-sigma": {"suppress": ["ς.example"]},
+    "suppress-zwj": {"suppress": ["a\u200db.example"]},
+    "suppress-zwnj": {"suppress": ["a\u200cb.example"]},
+    "keep-eszett": {"keep": ["@straße.example"]},
+    "keep-capital-eszett": {"keep": ["@Straẞe.example"]},
 }
 
 
@@ -356,6 +378,52 @@ def test_the_host_refuses_every_other_state(anchor, group, setup, rule):
     if setup.get("raw"):
         anchor.write(raw=setup["raw"])
     assert _rule(profile.host_profile, os.getuid()) == rule
+
+
+def test_suppressed_domains_are_kept_in_the_form_a_mail_is_compared_in(anchor):
+    anchor.write(_valid(suppress=["KLINIK.Example", "bücher.example"]))
+    assert profile.load_profile().suppress == ("klinik.example", "xn--bcher-kva.example")
+
+
+def test_a_domain_idna_2003_would_change_is_taken_in_its_xn_form(anchor):
+    """James on #96, finding 4: `straße.example` would hide `strasse.example`, another registration,
+    and the owner would believe the real one is listed."""
+    anchor.write(_valid(suppress=["xn--strae-oqa.example"]))
+    assert profile.load_profile().suppress == ("xn--strae-oqa.example",)
+
+
+def test_an_anchor_that_cannot_be_read_is_a_refusal_not_a_crash(anchor, group, monkeypatch):
+    """James on #94, finding 3: the launcher correlates by the start record, and a
+    traceback writes none."""
+    group(members=(ME,))
+    anchor.write()
+
+    def denied(path):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(profile, "_secure_dir", denied)
+    assert _rule(profile.host_profile, os.getuid()) == "anchor_unreadable"
+
+
+def test_a_profile_file_that_cannot_be_stat_ed_is_a_refusal_not_a_crash(anchor, group, monkeypatch):
+    group(members=(ME,))
+    anchor.write()
+    real = os.lstat
+
+    def denied(path, **kw):
+        if str(path).endswith(profile.PROFILE_NAME):
+            raise OSError(5, "input/output error")
+        return real(path, **kw)
+
+    monkeypatch.setattr(profile.os, "lstat", denied)
+    assert _rule(profile.host_profile, os.getuid()) == "anchor_unreadable"
+
+
+def test_a_uid_without_a_passwd_entry_is_not_a_member(group):
+    """Also finding 3: pwd raises KeyError for an unknown uid."""
+    group(members=(ME,))
+    unknown = 2**31 - 7
+    assert _rule(profile.host_profile, unknown) == "not_bot_user"
 
 
 # --- CLI: refused before click parses -------------------------------------------

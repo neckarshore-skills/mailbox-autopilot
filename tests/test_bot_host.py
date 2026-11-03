@@ -13,6 +13,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+import keyring.backends.macOS as macos
 import pytest
 
 from mailbox_cleanup import guards, host, profile
@@ -38,6 +39,8 @@ def _profile_doc(**over):
         "owner_targets": [],
         "caps": {"per_run": _caps(5), "per_day": _caps(0)},
         "keep": [],
+        "authserv_id": None,
+        "suppress": [],
     }
     doc.update(over)
     return doc
@@ -58,6 +61,7 @@ def install(tmp_path, monkeypatch):
     monkeypatch.setattr(profile, "ANCHOR_OWNER_UID", os.getuid())
     monkeypatch.setattr(profile, "_bot_group", lambda: (GID, frozenset({ME})))
     monkeypatch.setattr(guards, "_is_append_only", lambda st: True)
+    monkeypatch.setattr(macos.Keyring, "get_password", lambda self, s, n: "app-password")
     (adir / profile.PROFILE_NAME).write_text(json.dumps(_profile_doc()), encoding="utf-8")
     os.chmod(adir / profile.PROFILE_NAME, 0o644)
     log = adir / host.HOST_AUDIT_NAME
@@ -105,7 +109,7 @@ def _payload(answer) -> dict:
 def test_the_host_serves_the_bot_and_records_its_start(install):
     rc, answers = _serve({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     assert rc == 0
-    assert answers[3]["result"] == {"tools": []}  # 3c-1 builds no tool yet
+    assert [t["name"] for t in answers[3]["result"]["tools"]] == ["read", "search"]
     start = _records(install)[0]
     assert start["event"] == "start" and start["result"] == "ok"
     assert start["caller_uid"] == os.getuid() and start["profile"] is True
@@ -287,20 +291,34 @@ def test_no_argument_value_reaches_the_audit_log_on_the_ok_path(install):
     assert "arguments" not in _records(install)[-1]
 
 
-def test_the_allowlist_carries_the_tickets_names_with_move_and_flag_split():
-    """#76 section 2.2 by name; move and flag are each a preview and an apply, because
-    the apply takes no UIDs. Acceptance 5b pins this list."""
-    assert host.ALLOWED_TOOLS == {
+def test_the_allowlist_is_release_1_a_read_only_bot():
+    """Owner decision 2026-11-02 on #76. Acceptance 5b pins this list."""
+    assert host.ALLOWED_TOOLS == {"read", "search"}
+
+
+def test_every_later_stage_name_is_refused_under_its_own_name(install):
+    names = sorted(host.DEFERRED_TOOLS)
+    assert names == [
         "create-folder",
         "draft",
         "flag-apply",
         "flag-preview",
         "move-apply",
         "move-preview",
-        "read",
-        "search",
         "thread",
-    }
+    ]
+    _, answers = _serve(*(_call(n, id=10 + i) for i, n in enumerate(names)))
+    assert {_payload(a)["rule"] for i, a in answers.items() if i >= 10} == {"tool_not_allowed"}
+    calls = [r for r in _records(install) if r["event"] == "call"]
+    assert [r["tool"] for r in calls] == names
+
+
+@pytest.mark.parametrize("name", sorted(host.DEFERRED_TOOLS))
+def test_a_later_stage_tool_cannot_be_installed(install, name):
+    with pytest.raises(ValueError):
+        host.Host(
+            profile=profile.load_profile(), audit=_audit(install), tools={name: FakeTool(dict)}
+        )
 
 
 def test_a_tool_outside_the_allowlist_cannot_be_installed(install):
@@ -356,6 +374,47 @@ def test_no_data_leaves_the_host_when_its_audit_line_cannot_be_written(install):
     result = h.call("search", {})
     assert result["isError"] is True and "Geheim" not in json.dumps(result)
     assert json.loads(result["content"][0]["text"])["rule"] == "audit_log_missing"
+
+
+@pytest.mark.parametrize(
+    "value", [float("inf"), float("nan"), b"bytes", {1, 2}], ids=["inf", "nan", "bytes", "set"]
+)
+def test_a_result_the_host_cannot_serialise_is_an_error_not_an_ok_record(install, value):
+    """James on #94, finding 1: the record is written after the result is built, so the
+    log never says ok for a call that returned nothing, and no frame carries Infinity."""
+    result = _host(install, lambda args: {"x": value}).call("search", {})
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"]) == {
+        "error_code": "operation_error",
+        "message": "the operation failed",
+    }
+    rec = _records(install)[-1]
+    assert (rec["result"], rec["error_code"]) == ("error", "operation_error")
+
+
+@pytest.mark.parametrize(
+    "value", ["Geheim-Projekt", "folder_Geheim Projekt", "x" * 65, "a\nb", ""], ids=repr
+)
+def test_a_rule_that_is_no_program_token_is_recorded_as_unknown(install, value):
+    """James on #94, finding 2: from this slice tools raise their own refusals, and one
+    formatted rule would put a folder name into the log that promises to carry no value."""
+
+    def run(args):
+        raise GuardRefused("profile_refused", value, "refused", action=value)
+
+    _host(install, run).call("search", {})
+    rec = _records(install)[-1]
+    assert (rec["rule"], rec["action"]) == ("unknown", "unknown")
+    assert (rec["result"], rec["error_code"]) == ("refused", "profile_refused")
+
+
+def test_a_crash_is_recorded_by_its_exception_class_only(install):
+    def run(args):
+        raise KeyError("Geheim-Projekt")
+
+    _host(install, run).call("search", {})
+    rec = _records(install)[-1]
+    assert rec["exception"] == "KeyError" and "rule" not in rec
 
 
 # --- the process: stdout carries protocol frames only ---------------------------------

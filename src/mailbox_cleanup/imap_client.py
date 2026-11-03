@@ -66,10 +66,11 @@ def tls_context() -> _ssl.SSLContext:
     return ctx
 
 
-def _open(creds: Credentials, port: int, use_tls: bool):
+def _open(creds: Credentials, port: int, use_tls: bool, timeout: float | None = None):
+    extra = {} if timeout is None else {"timeout": timeout}
     if use_tls:
-        return MailBox(creds.server, port=port, ssl_context=tls_context())
-    return MailBoxUnencrypted(creds.server, port=port)
+        return MailBox(creds.server, port=port, ssl_context=tls_context(), **extra)
+    return MailBoxUnencrypted(creds.server, port=port, **extra)
 
 
 @contextmanager
@@ -79,6 +80,8 @@ def imap_connect(
     port: int = 993,
     ssl: bool | None = None,
     max_retries: int = 2,
+    select_inbox: bool = True,
+    timeout: float | None = None,
 ):
     """Connect to IMAP with single retry on transient failures.
 
@@ -86,6 +89,9 @@ def imap_connect(
     MAILBOX_CLEANUP_SSL=0) is allowed only for a loopback server and refused otherwise.
     A certificate failure is not transient and is raised at once, without retry.
     Backoff: 2s, 4s. After max_retries exhausted, raises IMAPConnectionError.
+    `select_inbox=False` selects nothing at login: the bot's read path opens its folder
+    read-only, and a SELECT before it would already be a read-write open. `timeout` is the
+    socket timeout in seconds; without one imaplib waits forever on a stalled server.
     """
     if ssl is None:
         ssl = os.environ.get(SSL_ENV, "1") != "0"
@@ -98,7 +104,11 @@ def imap_connect(
     # reach the caller unchanged, never be caught here and "retried" by yielding again.
     for attempt in range(max_retries + 1):
         try:
-            mb = _open(creds, port, ssl).login(creds.email, creds.password)
+            box = _open(creds, port, ssl, timeout)
+            if select_inbox:
+                mb = box.login(creds.email, creds.password)
+            else:
+                mb = box.login(creds.email, creds.password, initial_folder=None)
             break
         except _ssl.SSLCertVerificationError as e:
             raise IMAPCertificateError(
