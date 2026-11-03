@@ -36,6 +36,88 @@ def test_real_looking_address_hits():
     assert [(h.line, h.kind, h.label) for h in hits] == [(1, "public", "email")]
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "kim@bücher-owner.test",
+        "kim@sub.straße-owner.test",
+        "kim@beispiel.испытание",
+        "jörg@bücher-owner.test",
+        "müß@bücher-owner.test",  # no ASCII letter directly before the @
+        "kim@BÜCHER-OWNER.TEST",
+    ],
+)
+def test_an_address_at_a_non_ascii_domain_hits(address):
+    """James on #96, T1: an ASCII class saw two of six addresses in one commit. This guard
+    watches a repository whose subject is German mail."""
+    hits = _scan(f"x = '{address}'\n")
+    assert [(h.line, h.kind, h.label) for h in hits] == [(1, "public", "email")]
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "a@bücher.example",
+        "a@straße.example",
+        "a@раураl.example",
+        "a@sub.bücher.example",
+        "a@ｅｘａｍｐｌｅ.org",  # a compatibility form of a reserved name is that name
+    ],
+)
+def test_a_reserved_domain_passes_in_every_script(address):
+    assert _scan(f"x = '{address}'\n") == []
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "kim@bu\u0308cher-owner.test",  # NFD: U+0308 is a combining mark, not a word character
+        "kim\uff20bücher-owner.test",  # a fullwidth @
+        "kim@bücher-owner\uff0etest",  # a fullwidth dot
+    ],
+    ids=["nfd", "fullwidth-at", "fullwidth-dot"],
+)
+def test_a_decomposed_or_fullwidth_address_hits(address):
+    """James on #98, U1: the same address, in forms the raw line hides from the pattern."""
+    hits = _scan(f"x = '{address}'\n")
+    assert [(h.line, h.kind, h.label) for h in hits] == [(1, "public", "email")]
+
+
+@pytest.mark.parametrize(
+    "local, domain",
+    [
+        ("new\u017fletter", "linkedin.com"),  # long s
+        ("not\u0131fications", "github.com"),  # dotless i
+        ("newsletter", "lin\u212aedin.com"),  # Kelvin sign
+    ],
+    ids=["long-s", "dotless-i", "kelvin"],
+)
+def test_a_lookalike_of_a_vendor_mailbox_hits(local, domain):
+    """James on #98: Unicode IGNORECASE folds these onto `s`, `i` and `k`, so the system
+    address list would have waved a lookalike through. The long s also holds that a hit in
+    either form counts: its NFKC form is the real mailbox, and that must not clear the raw
+    line."""
+    hits = _scan(f"x = '{local}" + "@" + f"{domain}'\n")
+    assert [(h.kind, h.label) for h in hits] == [("public", "email")]
+
+
+def test_a_system_address_in_any_case_still_passes():
+    assert _scan("x = 'NEWSLETTER" + "@" + "LinkedIn.com'\n") == []
+
+
+def test_an_underscore_still_ends_a_domain():
+    """No host name holds one, so the wider class changes nothing for ASCII addresses."""
+    assert _scan("x = 'a@exa_mple.org'\n") == []
+
+
+def test_a_non_ascii_address_in_a_tracked_file_fails_the_tree(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"docs/old.md": "kim@bücher-owner.test\n", "ok.py": "x = 1\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--tree"]) == 1
+    assert "docs/old.md:1: email" in capsys.readouterr().out
+
+
 def test_valid_iban_hits_invalid_does_not():
     hits = _scan("ok DE89 3704 0044 0532 0130 00\nnot DE00 1234 5678 9012 3456 78\n")
     assert [(h.line, h.label) for h in hits] == [(1, "iban")]
