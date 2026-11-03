@@ -212,13 +212,13 @@ _V2_INVALID = {
     "suppress-bare-word": {"suppress": ["klinik"]},
     "suppress-wildcard": {"suppress": ["*.klinik.example"]},
     "suppress-numeric": {"suppress": ["192.168.1.1"]},
-    "suppress-eszett": {"suppress": ["straße.de"]},
-    "suppress-capital-eszett": {"suppress": ["Straẞe.de"]},
+    "suppress-eszett": {"suppress": ["straße.example"]},
+    "suppress-capital-eszett": {"suppress": ["Straẞe.example"]},
     "suppress-final-sigma": {"suppress": ["ς.example"]},
     "suppress-zwj": {"suppress": ["a\u200db.example"]},
     "suppress-zwnj": {"suppress": ["a\u200cb.example"]},
-    "keep-eszett": {"keep": ["@straße.de"]},
-    "keep-capital-eszett": {"keep": ["@Straẞe.de"]},
+    "keep-eszett": {"keep": ["@straße.example"]},
+    "keep-capital-eszett": {"keep": ["@Straẞe.example"]},
 }
 
 
@@ -386,10 +386,10 @@ def test_suppressed_domains_are_kept_in_the_form_a_mail_is_compared_in(anchor):
 
 
 def test_a_domain_idna_2003_would_change_is_taken_in_its_xn_form(anchor):
-    """James on #96, finding 4: `straße.de` would hide `strasse.de`, another registration,
+    """James on #96, finding 4: `straße.example` would hide `strasse.example`, another registration,
     and the owner would believe the real one is listed."""
-    anchor.write(_valid(suppress=["xn--strae-oqa.de"]))
-    assert profile.load_profile().suppress == ("xn--strae-oqa.de",)
+    anchor.write(_valid(suppress=["xn--strae-oqa.example"]))
+    assert profile.load_profile().suppress == ("xn--strae-oqa.example",)
 
 
 def test_an_anchor_that_cannot_be_read_is_a_refusal_not_a_crash(anchor, group, monkeypatch):

@@ -64,7 +64,7 @@ SEARCH_SCAN_MAX = 1000  # UIDs one search looks through to fill its page
 INVALID_SENDER = "invalid"  # no host name has one label, so this cannot be a domain
 SUFFIX_FILE = "public_suffix.dat"  # package data, root-owned with the package (L3)
 MIN_SUFFIX_RULES = 1000  # a shorter file is a broken one: every domain would be cut wrong
-# Python's IDNA 2003 maps these away, so `straße.de` would read `strasse.de`, another
+# Python's IDNA 2003 maps these away, so `straße.example` would read `strasse.example`, another
 # registration. A domain holding one is no domain here, and a list entry is refused.
 IDNA_2003_CHANGES = frozenset("ßẞς\u200c\u200d")
 
@@ -87,8 +87,8 @@ def normal_domain(value: str) -> str | None:
     """Lower-case ASCII with punycode for anything else, so a lookalike in another script
     shows as what it is; None unless the result is a plain host name. The last label must
     hold a letter, so a numeric host such as an IP address is none (no IP leaves the host).
-    A value this codec would turn into another domain is none too, so a record never names
-    a neighbour (IDNA_2003_CHANGES)."""
+    A value holding one of the five characters this codec maps away (`ß`, `ẞ`, `ς`, ZWNJ,
+    ZWJ: IDNA_2003_CHANGES) is none too, so a record never names a neighbour."""
     if IDNA_2003_CHANGES & set(value):
         return None
     try:

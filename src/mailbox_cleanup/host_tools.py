@@ -177,7 +177,9 @@ def build(p) -> dict[str, Tool]:
     try:
         lean = Lean(keep=p.keep, authserv_id=p.authserv_id, suppress=p.suppress)
     except (OSError, ValueError):
-        raise _refuse("suffix_list_unavailable", "the public suffix list is missing") from None
+        raise _refuse(
+            "suffix_list_unavailable", "the public suffix list is missing or too short"
+        ) from None
 
     def search(args: dict) -> dict:
         _only(args, _SEARCH_ARGS, _REFUSED_CRITERIA)
