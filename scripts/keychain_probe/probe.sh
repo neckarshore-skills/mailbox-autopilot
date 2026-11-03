@@ -21,6 +21,7 @@ LOGIN_SECRET="$DIR/login.secret"
 REPORT="$DIR/report.jsonl"
 KEPT_REPORT="/Users/Shared/keychain-probe-report.jsonl"
 PARTITION="$DIR/partition" # which half of arm 3 read; later arms use only that one
+DOMAIN="$DIR/domain"       # the search list domain that held in arm 2; every read sets it
 PY="$DIR/venv311/bin/python"
 PY2="$DIR/venv312/bin/python"
 
@@ -87,6 +88,24 @@ run_job() { # arm mode action [job arguments]
   run_job_with "$PY" "$@"
 }
 
+read_job_with() { # interpreter arm mode action [job arguments]: a read the list has to reach
+  run_job_with "$@"
+  if ! "$PY" "$DIR/show.py" --listed "$DIR/out/$2-$3.out"; then
+    die "$2: the keychain was not on the job's search list. Stop here, and tell Obi"
+  fi
+}
+
+read_job() { # arm mode action [job arguments]
+  read_job_with "$PY" "$@"
+}
+
+proven_domain() { # sitting 1: a list set by an earlier job does not reach the next one
+  local proven=""
+  if [ -f "$DOMAIN" ]; then proven=$(cat "$DOMAIN"); fi
+  [ -n "$proven" ] || die "no domain put the keychain on the job's search list. Stop here, and tell Obi"
+  printf '%s\n' "$proven"
+}
+
 proven_partition() { # stop rule: arms 4, 6 and 7 mean something only with what arm 3 proved
   local proven=""
   if [ -f "$PARTITION" ]; then proven=$(cat "$PARTITION"); fi
@@ -147,18 +166,31 @@ cmd_arm1() {
 cmd_arm2() {
   home_ready
   run_job arm2-prepare drop prepare
-  run_job arm2 drop read
-  run_job arm2 username read
+  local d domain
+  rm -f "$DOMAIN"
+  for d in user dynamic; do
+    run_job "arm2-search-$d" drop search --search-domain "$d"
+    if "$PY" "$DIR/show.py" --listed "$DIR/out/arm2-search-$d-drop.out"; then
+      printf '%s\n' "$d" >"$DOMAIN"
+      break
+    fi
+  done
+  domain=$(proven_domain)
+  say "search list domain that held: $domain"
+  read_job arm2 drop read --search-domain "$domain"
+  read_job arm2 username read --search-domain "$domain"
 }
 
 cmd_arm3() {
   home_ready
+  local domain
+  domain=$(proven_domain)
   run_job arm3a-prepare drop prepare
-  run_job arm3a drop unlock-read
+  read_job arm3a drop unlock-read --search-domain "$domain"
   run_job arm3b-prepare drop prepare --partition unsigned
-  run_job arm3b drop unlock-read
+  read_job arm3b drop unlock-read --search-domain "$domain"
   run_job arm3c-prepare drop prepare --partition cdhash
-  run_job arm3c drop unlock-read
+  read_job arm3c drop unlock-read --search-domain "$domain"
   "$PY" "$DIR/show.py" --winner "$REPORT" >"$PARTITION"
   say "partition that read: $(cat "$PARTITION")"
   proven_partition >/dev/null
@@ -166,32 +198,35 @@ cmd_arm3() {
 
 cmd_arm6() {
   home_ready
-  local partition
+  local partition domain
+  domain=$(proven_domain)
   partition=$(proven_partition)
   run_job arm6a-prepare drop prepare --no-trust --partition "$partition"
-  run_job arm6a drop unlock-read
+  read_job arm6a drop unlock-read --search-domain "$domain"
   run_job arm6b-prepare drop prepare --partition "$partition"
-  run_job_with "$PY2" arm6b drop unlock-read
+  read_job_with "$PY2" arm6b drop unlock-read --search-domain "$domain"
 }
 
 cmd_arm7() {
   home_ready
-  local partition
+  local partition domain
+  domain=$(proven_domain)
   partition=$(proven_partition)
   run_job arm7-prepare drop prepare --partition "$partition"
-  run_job arm7 drop unlock-read --service mailbox-cleanup-probe-wrong
+  read_job arm7 drop unlock-read --search-domain "$domain" --service mailbox-cleanup-probe-wrong
 }
 
 cmd_arm4_install() { # the plist stays in place, so launchd starts the job at boot
   home_ready
-  local partition
+  local partition domain
+  domain=$(proven_domain)
   partition=$(proven_partition)
   run_job arm4-prepare drop prepare --partition "$partition"
   local out="$DIR/out/arm4-boot.out" err="$DIR/out/arm4-boot.err"
   : >"$out"
   : >"$err"
   emit_plist "$PY" "$out" "$err" drop --arm arm4 --mode drop --action unlock-read \
-    --user "$USER_NAME" --group "$GROUP_NAME" --secret-file "$SECRET"
+    --user "$USER_NAME" --group "$GROUP_NAME" --secret-file "$SECRET" --search-domain "$domain"
   chown -h "$USER_NAME" "$out" "$err"
   say "installed for the next boot. Reboot, then: arm4-read, then arm4b"
 }
@@ -200,12 +235,17 @@ cmd_arm4_read() {
   launchctl bootout "system/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
   record arm4 drop "$DIR/out/arm4-boot.out" "$DIR/out/arm4-boot.err"
+  if ! "$PY" "$DIR/show.py" --listed "$DIR/out/arm4-boot.out"; then
+    die "arm4: the keychain was not on the job's search list. Stop here, and tell Obi"
+  fi
 }
 
 cmd_arm4b() { # the state of the 14 runs a day: the owner logged in, the bot not
   [ "$(stat -f %Su /dev/console)" != "root" ] || die "nobody is at the console yet; wait and retry"
+  local domain
+  domain=$(proven_domain)
   proven_partition >/dev/null
-  run_job arm4b drop unlock-read
+  read_job arm4b drop unlock-read --search-domain "$domain"
 }
 
 cmd_arm5_reset() {
@@ -220,9 +260,11 @@ cmd_arm5_reset() {
     "$("$PY" -c 'import os,sys; print(os.path.realpath(sys.executable))')"
 }
 
-cmd_arm5_read() {
-  run_job arm5 drop read
-  run_job arm5 username read
+cmd_arm5_read() { # the login keychain the GUI login made, not the probe's
+  local domain
+  domain=$(proven_domain)
+  read_job arm5 drop read --search-domain "$domain" --keychain login
+  read_job arm5 username read --search-domain "$domain" --keychain login
 }
 
 cmd_report() {

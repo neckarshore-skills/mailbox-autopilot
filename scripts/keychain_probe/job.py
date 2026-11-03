@@ -104,8 +104,40 @@ def _partitions(kind: str) -> str:
     return f"{BASE_PARTITIONS},cdhash:{found[0].split('=', 1)[1]}"
 
 
-def _keychain_path() -> str:
-    return os.path.join(os.environ["HOME"], "Library/Keychains/probe.keychain-db")
+def _keychain_path(name: str = "probe") -> str:
+    """`probe` is the one `prepare` makes; `login` is the one arm 5's GUI login makes."""
+    return os.path.join(os.environ["HOME"], f"Library/Keychains/{name}.keychain-db")
+
+
+def _same_keychain(entry: str, home: str) -> str:
+    if entry.startswith("~/"):
+        entry = os.path.join(home, entry[2:])
+    return entry.removesuffix("-db")
+
+
+def on_list(entries: list[str], path: str, *, home: str) -> bool:
+    """`security` may list `~/…/probe.keychain` for the file `probe.keychain-db`, which is how
+    the plist on the target Mac spelled it (sitting 1), so both forms count."""
+    return any(_same_keychain(e, home) == _same_keychain(path, home) for e in entries)
+
+
+def use_search_list(domain: str, path: str) -> dict:
+    """Put the keychain on this job's search list, then look. Measured in sitting 1: a list
+    set by an earlier job is on disk, and a later job of a user who never logged in sees only
+    the System keychain. keyring reads through the search list only (it ignores a keychain
+    path, see its `warn_keychain`), so a read the list does not reach says `none` for a
+    reason that has nothing to do with access."""
+    put = security_script([f"list-keychains -d {domain} -s {path}"])
+    _, in_domain = _run(SECURITY, "list-keychains", "-d", domain)
+    _, plain = _run(SECURITY, "list-keychains")
+    seen = _keychains(in_domain)
+    return {
+        "domain": domain,
+        "set": put,
+        "domain_list": seen,
+        "search_list": _keychains(plain),
+        "on_list": on_list(seen, path, home=os.environ.get("HOME", "")),
+    }
 
 
 def security_script(lines: list[str], secret: str = "") -> dict:
@@ -231,7 +263,18 @@ def run_arm(args) -> dict:
     record["facts"] = facts(args.group)
     if args.action == "prepare":
         record["prepare"] = prepare(secret, trust=not args.no_trust, partition=args.partition)
-    elif args.action == "read":
+        _, search = _run(SECURITY, "list-keychains")
+        _, default = _run(SECURITY, "default-keychain")
+        record["after_prepare"] = {
+            "search_list": _keychains(search),
+            "default_keychain": _keychains(default),
+        }
+        return record
+    if args.search_domain:
+        record["search"] = use_search_list(args.search_domain, _keychain_path(args.keychain))
+        if args.action == "search" or not record["search"]["on_list"]:
+            return record  # no read past the list: its `none` would look like an answer
+    if args.action == "read":
         record["read"] = read_item(args.service)
     elif args.action == "unlock-read":
         record.update(unlock_and_read(secret, args.service))
@@ -244,7 +287,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", required=True)
     ap.add_argument("--mode", choices=("drop", "username"), required=True)
-    ap.add_argument("--action", choices=("prepare", "read", "reset", "unlock-read"), required=True)
+    ap.add_argument(
+        "--action", choices=("prepare", "read", "reset", "search", "unlock-read"), required=True
+    )
+    ap.add_argument("--search-domain", choices=("user", "dynamic"))
+    ap.add_argument("--keychain", choices=("probe", "login"), default="probe")
     ap.add_argument("--user", required=True)
     ap.add_argument("--group", required=True)
     ap.add_argument("--secret-file")

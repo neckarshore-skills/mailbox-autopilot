@@ -1,4 +1,4 @@
-"""Reading job.py's JSON: one line per arm for the person at the keyboard, and the two
+"""Reading job.py's JSON: one line per arm for the person at the keyboard, and the three
 answers the runner's stop rules need."""
 
 import json
@@ -13,6 +13,11 @@ def line(r: dict) -> str:
         return f"{head}: FAILED in the job, {r['failed']}"
     facts = r.get("facts", {})
     who = f"uid {facts.get('uid')}, console {facts.get('console_user')}"
+    search = r.get("search")
+    if search is not None and not search.get("on_list"):
+        return f"{head}: NOT ON THE SEARCH LIST ({search.get('domain')}), no read ({who})"
+    if r.get("action") == "search":
+        return f"{head}: on the search list ({search.get('domain')}) ({who})"
     read = r.get("read")
     if read is None:
         step = r.get("prepare", r.get("reset", {}))
@@ -39,6 +44,13 @@ def prepared(path: str) -> bool:
     )
 
 
+def listed(path: str) -> bool:
+    """Every job in this file had the keychain on its own search list. A reading job that set
+    no list at all fails too: that is how f6df90b read past the keychain in sitting 1."""
+    found = records(path)
+    return bool(found) and all(r.get("search", {}).get("on_list") is True for r in found)
+
+
 def winner(path: str) -> str:
     """The first half of arm 3 that read the canary, or nothing."""
     read = {r.get("arm"): r.get("read", {}) for r in records(path)}
@@ -51,6 +63,8 @@ def winner(path: str) -> str:
 if __name__ == "__main__":
     if sys.argv[1] == "--prepared":
         sys.exit(0 if prepared(sys.argv[2]) else 1)
+    if sys.argv[1] == "--listed":
+        sys.exit(0 if listed(sys.argv[2]) else 1)
     if sys.argv[1] == "--winner":
         sys.stdout.write(winner(sys.argv[2]))  # no newline: no winner writes nothing at all
         sys.exit(0)

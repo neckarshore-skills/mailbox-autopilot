@@ -308,6 +308,131 @@ def test_a_failed_create_stops_before_the_canary_can_land_elsewhere(monkeypatch,
     assert len(seen) == 1 and "add-generic-password" not in seen[0]
 
 
+# --- the search list: sitting 1 on the target Mac, 2026-11-03 ---------------------------
+# Measured there: a user search list written in one launchd job is on disk, but the next job
+# sees only the System keychain. keyring 25.7.0 ignores a keychain path, so a reading job
+# reaches the probe keychain only if it puts it on its own search list first.
+
+
+def test_keyring_cannot_be_pointed_at_a_keychain():
+    """The reason the list is set in the job: the pinned backend says so in its own code."""
+    source = Path(macos.__file__).read_text(encoding="utf-8")
+    assert "Specified keychain is ignored" in source
+
+
+@pytest.mark.parametrize(
+    "entries, listed",
+    [
+        (["/Users/u/Library/Keychains/probe.keychain-db"], True),
+        (["~/Library/Keychains/probe.keychain"], True),  # how the plist on disk spelled it
+        (["/Users/u/Library/Keychains/probe.keychain"], True),
+        (["/Library/Keychains/System.keychain", "/Library/Keychains/System.keychain"], False),
+        (["/Users/other/Library/Keychains/probe.keychain-db"], False),
+        ([], False),
+    ],
+    ids=["db", "tilde", "no-db", "system-only", "other-home", "empty"],
+)
+def test_a_keychain_is_found_on_the_list_in_either_spelling(entries, listed):
+    path = "/Users/u/Library/Keychains/probe.keychain-db"
+    assert job.on_list(entries, path, home="/Users/u") is listed
+
+
+def test_arm_5_reads_the_keychain_the_gui_login_made(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/u")
+    assert job._keychain_path("login") == "/Users/u/Library/Keychains/login.keychain-db"
+    assert job._keychain_path() == "/Users/u/Library/Keychains/probe.keychain-db"
+
+
+@pytest.fixture
+def lists(monkeypatch, tmp_path):
+    """`security` whose search list holds what this job set, and nothing a job before it set."""
+    state = {"calls": [], "held": [], "works": {"user"}}
+
+    def run(argv, input=None, **kw):
+        state["calls"].append((argv, input))
+        for line in (input or "").splitlines():
+            m = re.match(r"list-keychains -d (\w+) -s (\S+)", line)
+            if m and m.group(1) in state["works"]:
+                state["held"] = [m.group(2)]
+        if list(argv[1:2]) == ["list-keychains"]:
+            shown = state["held"] or ["/Library/Keychains/System.keychain"]
+            return SimpleNamespace(returncode=0, stdout="".join(f'    "{x}"\n' for x in shown))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(job.subprocess, "run", run)
+    monkeypatch.setattr(job, "facts", lambda group: {"uid": 1})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return state
+
+
+def _job(action):
+    return ["--arm", "armX", "--mode", "drop", "--action", action, "--user", "u", "--group", "g"]
+
+
+def test_the_job_sets_the_search_list_before_it_reads(lists, monkeypatch, capsys):
+    order = []
+    monkeypatch.setattr(job, "drop_to", lambda user: None)
+    monkeypatch.setattr(
+        job, "read_item", lambda service: order.append(len(lists["calls"])) or {"outcome": "none"}
+    )
+    job.main(_job("read") + ["--search-domain", "user"])
+    record = json.loads(capsys.readouterr().out)
+    sets = [i for i, (_, s) in enumerate(lists["calls"]) if s and "list-keychains -d user -s" in s]
+    assert sets and order and sets[0] < order[0]
+    assert record["search"]["on_list"] is True and record["search"]["domain"] == "user"
+
+
+def test_a_keychain_that_is_not_on_the_list_is_not_read(lists, monkeypatch, capsys):
+    """Sitting 1: a read past the list says `none`, which looks like an answer and is not."""
+    lists["works"] = set()
+    monkeypatch.setattr(job, "drop_to", lambda user: None)
+    monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("read past the list"))
+    job.main(_job("unlock-read") + ["--search-domain", "user"])
+    record = json.loads(capsys.readouterr().out)
+    assert record["search"]["on_list"] is False
+    assert "read" not in record and "unlock" not in record
+
+
+def test_a_search_job_only_sets_and_looks(lists, monkeypatch, capsys):
+    monkeypatch.setattr(job, "drop_to", lambda user: None)
+    monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("a search job read"))
+    job.main(_job("search") + ["--search-domain", "user"])
+    assert json.loads(capsys.readouterr().out)["search"]["on_list"] is True
+
+
+def test_prepare_records_the_list_it_leaves_behind(lists, monkeypatch, capsys):
+    """Sitting 1 could not tell 'the write did not land' from 'the next job did not see it',
+    because the facts were taken before `prepare` ran."""
+    monkeypatch.setattr(job, "drop_to", lambda user: None)
+    job.main(_job("prepare"))
+    record = json.loads(capsys.readouterr().out)
+    assert record["after_prepare"]["search_list"][0].endswith("probe.keychain-db")
+
+
+def _searched(on_list):
+    return {"arm": "armX", "search": {"domain": "user", "on_list": on_list}}
+
+
+@pytest.mark.parametrize(
+    "lines, ok",
+    [
+        ((_searched(True),), True),
+        ((_searched(True), _searched(False)), False),
+        (({"arm": "armX", "read": {}},), False),  # a reading job that set no list at all
+        ((), False),
+    ],
+    ids=["listed", "one-not", "no-search", "empty"],
+)
+def test_the_runner_learns_whether_the_job_had_the_keychain_on_its_list(tmp_path, lines, ok):
+    assert show.listed(_report(tmp_path, *lines)) is ok
+
+
+def test_a_refused_read_says_so_on_the_line_the_owner_reads():
+    refused = {"arm": "arm3a", "mode": "drop", "search": {"domain": "user", "on_list": False}}
+    line = show.line(refused)
+    assert "NOT ON THE SEARCH LIST" in line and "no canary" not in line
+
+
 def test_a_failed_unlock_shows_on_the_line_the_owner_reads():
     line = show.line(
         {
@@ -335,9 +460,15 @@ r = {"arm": arm, "mode": get("--mode"), "action": action, "facts": {"uid": 501}}
 if action == "prepare":
     bad = arm == os.environ.get("WALK_FAIL_PREPARE")
     r["prepare"] = {"rc": 0, "errors": ["add-generic-password: returned 45"] if bad else []}
-if action in ("read", "unlock-read"):
-    hit = arm in os.environ.get("WALK_READS", "").split(",")
-    r["read"] = {"outcome": "value", "osstatus": None, "value_equals_canary": hit}
+# Sitting 1: a list set in an earlier job is gone; only a domain set in this job can hold.
+domain = get("--search-domain") if "--search-domain" in args else ""
+listed = bool(domain) and domain in os.environ.get("WALK_DOMAINS", "user").split(",")
+if domain:
+    r["search"] = {"domain": domain, "on_list": listed}
+if action in ("read", "unlock-read") and (listed or not domain):
+    hit = listed and arm in os.environ.get("WALK_READS", "").split(",")
+    outcome = "value" if hit else "none"
+    r["read"] = {"outcome": outcome, "osstatus": None, "value_equals_canary": hit}
 open(doc["StandardOutPath"], "a").write(json.dumps(r) + "\n")
 """
 FAKE_ID = r"""#!/bin/bash
@@ -447,9 +578,21 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
     reads = "arm3b,arm4b,arm7,arm5"
     r = walk("setup", "arm1", "arm2", "arm3", "arm6", "arm7", "arm4-install", WALK_READS=reads)
     assert r.returncode == 0, r.stderr
+    boot = plistlib.loads(
+        (walk.root / "Library/LaunchDaemons/ai.neckarshore.keychain-probe.plist").read_bytes()
+    )["ProgramArguments"]
+    assert boot[boot.index("--search-domain") + 1] == "user"
     directory = walk.root / "Library/mailbox-autopilot-probe"
     (directory / "out/arm4-boot.out").write_text(
-        json.dumps({"arm": "arm4", "mode": "drop", "read": {"value_equals_canary": True}}) + "\n",
+        json.dumps(
+            {
+                "arm": "arm4",
+                "mode": "drop",
+                "search": {"domain": "user", "on_list": True},
+                "read": {"value_equals_canary": True},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     r = walk("arm4-read", "arm4b", WALK_READS=reads)
@@ -467,6 +610,7 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
         "arm1",
         "arm1",
         "arm2-prepare",
+        "arm2-search-user",
         "arm2",
         "arm2",
         "arm3a-prepare",
@@ -491,6 +635,11 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
     later = [a for a in prepared if a[a.index("--arm") + 1].startswith(("arm4", "arm6", "arm7"))]
     assert later and all(a[a.index("--partition") + 1] == "unsigned" for a in later)
     assert any(a[0].endswith("venv312/bin/python") for a in walk.jobs())
+    reading = [a for a in walk.jobs() if a[a.index("--action") + 1] in ("read", "unlock-read")]
+    past_arm1 = [a for a in reading if a[a.index("--arm") + 1] != "arm1"]
+    assert past_arm1 and all(a[a.index("--search-domain") + 1] == "user" for a in past_arm1)
+    arm5 = [a for a in reading if a[a.index("--arm") + 1] == "arm5"]
+    assert arm5 and all(a[a.index("--keychain") + 1] == "login" for a in arm5)
 
     r = walk("cleanup")
     assert r.returncode == 1  # the report is still there, and status says so
@@ -501,11 +650,40 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
 
 
 def test_no_half_of_arm_3_stops_the_run_with_the_right_reason(walk):
-    r = walk("setup", "arm3")
+    r = walk("setup", "arm2", "arm3")
     assert r.returncode == 2 and "no half of arm 3 read the canary" in r.stderr
     for arm in ("arm6", "arm7", "arm4-install", "arm4b"):
         r = walk(arm)
         assert r.returncode == 2 and "no half of arm 3 read the canary" in r.stderr
+
+
+def test_the_second_domain_is_tried_and_kept_when_the_first_does_not_hold(walk):
+    r = walk("setup", "arm2", "arm3", WALK_DOMAINS="dynamic", WALK_READS="arm3a")
+    assert r.returncode == 0, r.stderr
+    arms = [a[a.index("--arm") + 1] for a in walk.jobs()]
+    assert arms[1:3] == ["arm2-search-user", "arm2-search-dynamic"]
+    later = [a for a in walk.jobs() if a[a.index("--arm") + 1].startswith("arm3")]
+    assert all(a[a.index("--search-domain") + 1] == "dynamic" for a in later if "unlock-read" in a)
+
+
+def test_no_domain_that_holds_stops_every_reading_arm(walk):
+    r = walk("setup", "arm2", WALK_DOMAINS="")
+    assert r.returncode == 2 and "no domain put the keychain on" in r.stderr
+    for arm in ("arm3", "arm6", "arm7", "arm4-install", "arm4b", "arm5-read"):
+        r = walk(arm)
+        assert r.returncode == 2 and "no domain put the keychain on" in r.stderr, arm
+
+
+def test_a_reading_arm_without_the_list_stops_the_run(walk):
+    """Corrupt the runner the way f6df90b was built, one arm without the in-job list, and the
+    gate must stop it instead of reporting `no canary`."""
+    script = walk.root / "run/probe.sh"
+    text = script.read_text(encoding="utf-8")
+    good = 'read_job arm2 drop read --search-domain "$domain"'
+    assert good in text
+    script.write_text(text.replace(good, "read_job arm2 drop read"), encoding="utf-8")
+    r = walk("setup", "arm2")
+    assert r.returncode == 2 and "not on the job's search list" in r.stderr
 
 
 def test_a_failed_prepare_line_stops_the_run_with_the_right_reason(walk):
