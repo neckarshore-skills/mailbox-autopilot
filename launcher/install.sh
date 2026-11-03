@@ -113,10 +113,13 @@ install_user() {
   fi
   say "the bot group and user: not an admin, never logged in"
   dseditgroup -o create -r "mailbox-autopilot bot" "$BOT_GROUP"
-  # The password handling follows L11, which the keychain probe decides; until then a
-  # random password that nobody keeps, so the account cannot be logged into.
-  sysadminctl -addUser "$BOT_USER" -fullName "Mailbox Autopilot Bot" \
-    -password "$(openssl rand -hex 24)"
+  # The password handling follows L11, which the keychain probe decides. Until then
+  # sysadminctl prompts for it ('-'), so it never stands in a process list: type a long
+  # throwaway and keep it nowhere. No login shell, hidden from the login window.
+  say "sysadminctl asks for the bot's password now: type a long throwaway, keep it nowhere"
+  sysadminctl -addUser "$BOT_USER" -fullName "Mailbox Autopilot Bot" -shell /usr/bin/false \
+    -password -
+  dscl . -create "/Users/$BOT_USER" IsHidden 1
   dseditgroup -o edit -a "$BOT_USER" -t user "$BOT_GROUP"
   createhomedir -c -u "$BOT_USER" >/dev/null
 }

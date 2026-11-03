@@ -34,6 +34,7 @@ RUN_DAYS = 14
 DIGEST_DAYS = 30
 AUDIT_DAYS = 90
 DAY_S = 86400
+SF_APPEND = getattr(stat, "SF_APPEND", 0x00040000)  # the system append-only flag
 
 
 def prune_dir(directory: Path, days: int, now: float) -> list[str]:
@@ -60,33 +61,45 @@ def _line_time(line: bytes) -> datetime | None:
         return None
 
 
-def prune_audit(path: Path, days: int, now: float, *, flags: bool = True) -> int:
+def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPEND) -> int:
     """Drop lines older than `days`. A line whose time cannot be read is kept: losing an
     audit record is worse than keeping one too long. Returns the number dropped.
-    `flags=False` only in tests, which cannot set the system flag."""
+
+    macOS refuses to rename a file that carries an append-only flag, and refuses to
+    replace one (measured with `uappend`). So the order is: write the kept lines to a
+    fresh file with no flag, clear the live file's flag, replace, then set the flag on
+    the final path. Between the clear and the set the host refuses the log, which fails
+    closed, and the job runs outside the run hours. A leftover fresh file from a run that
+    died is removed first, and the flag is set on the live log on every run, so a run
+    that died after the clear is healed by the next one.
+
+    `flag` is SF_APPEND in production. Tests pass UF_APPEND, which an owner may set and
+    clear, or None where chflags does not exist."""
     if not path.is_file():
         return 0
+    fresh = path.with_name(path.name + ".retention")
+    if fresh.is_symlink() or fresh.exists():
+        fresh.unlink()
     cutoff = datetime.fromtimestamp(now, UTC) - timedelta(days=days)
     lines = path.read_bytes().splitlines(keepends=True)
     kept = [x for x in lines if (t := _line_time(x)) is None or t >= cutoff]
     dropped = len(lines) - len(kept)
-    if dropped == 0:
-        return 0
-    st = path.stat()
-    fresh = path.with_name(path.name + ".retention")
-    fd = os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, b"".join(kept))
-        if os.geteuid() == 0:
-            os.fchown(fd, st.st_uid, st.st_gid)
-        os.fchmod(fd, stat.S_IMODE(st.st_mode))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    if flags:
-        os.chflags(fresh, st.st_flags | stat.SF_APPEND)
-        os.chflags(path, st.st_flags & ~stat.SF_APPEND)
-    os.replace(fresh, path)
+    if dropped:
+        st = path.stat()
+        fd = os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, b"".join(kept))
+            if os.geteuid() == 0:
+                os.fchown(fd, st.st_uid, st.st_gid)
+            os.fchmod(fd, stat.S_IMODE(st.st_mode))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if flag is not None:
+            os.chflags(path, st.st_flags & ~flag)
+        os.replace(fresh, path)
+    if flag is not None:
+        os.chflags(path, path.stat().st_flags | flag)
     return dropped
 
 

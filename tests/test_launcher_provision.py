@@ -182,7 +182,7 @@ def test_prune_audit_drops_lines_past_90_days_and_keeps_unreadable_ones(tmp_path
     log = tmp_path / "host-audit.log"
     log.write_text(_line(91, now, n=1) + "not json\n" + _line(89, now, n=2) + '{"no": "time"}\n')
     log.chmod(0o640)
-    assert retention.prune_audit(log, 90, now, flags=False) == 1
+    assert retention.prune_audit(log, 90, now, flag=None) == 1
     lines = log.read_text().splitlines()
     assert len(lines) == 3 and json.loads(lines[1])["n"] == 2
     assert stat.S_IMODE(log.stat().st_mode) == 0o640
@@ -194,10 +194,42 @@ def test_prune_audit_leaves_the_file_alone_when_nothing_is_old(tmp_path):
     log = tmp_path / "host-audit.log"
     log.write_text(_line(1, now))
     inode = log.stat().st_ino
-    assert retention.prune_audit(log, 90, now, flags=False) == 0
+    assert retention.prune_audit(log, 90, now, flag=None) == 0
     assert log.stat().st_ino == inode
 
 
 def test_retention_imports_nothing_from_the_package():
     source = (LAUNCHER / "retention.py").read_text()
     assert not re.search(r"^\s*(from|import)\s+mailbox_cleanup", source, re.M)
+
+
+darwin = pytest.mark.skipif(not hasattr(os, "chflags"), reason="chflags is BSD and macOS only")
+
+
+@pytest.fixture
+def flagged_log(tmp_path):
+    log = tmp_path / "host-audit.log"
+    yield log
+    for p in tmp_path.iterdir():
+        os.chflags(p, 0)
+
+
+@darwin
+def test_prune_audit_runs_the_real_flag_sequence_with_the_user_flag(flagged_log):
+    now = time.time()
+    flagged_log.write_text(_line(91, now, n=1) + _line(1, now, n=2))
+    os.chflags(flagged_log, stat.UF_APPEND)
+    assert retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND) == 1
+    assert [json.loads(x)["n"] for x in flagged_log.read_text().splitlines()] == [2]
+    assert flagged_log.stat().st_flags & stat.UF_APPEND
+    assert sorted(p.name for p in flagged_log.parent.iterdir()) == ["host-audit.log"]
+
+
+@darwin
+def test_a_run_that_died_after_the_clear_is_healed_by_the_next(flagged_log):
+    now = time.time()
+    flagged_log.write_text(_line(1, now))
+    (flagged_log.parent / "host-audit.log.retention").write_text("half written")
+    assert retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND) == 0
+    assert flagged_log.stat().st_flags & stat.UF_APPEND
+    assert sorted(p.name for p in flagged_log.parent.iterdir()) == ["host-audit.log"]
