@@ -252,19 +252,21 @@ def test_the_environment_is_built_from_nothing(monkeypatch):
         "HOME",
         "LANG",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "DISABLE_UPDATES",
     }
     assert not any(k.startswith("ANTHROPIC") for k in env)
 
 
 def test_the_invocation_is_literal():
-    assert gate.build_argv(Path("/c"), Path("/h.json")) == [
+    assert gate.build_argv(Path("/c"), Path("/h.json"), Path("/s.json")) == [
         "/c", "-p",
         "--tools", "",
         "--allowedTools", "mcp__mailbox__read", "mcp__mailbox__search",
         "--strict-mcp-config", "--mcp-config", "/h.json",
         "--disable-slash-commands",
         "--setting-sources", "",
+        "--settings", "/s.json",
         "--no-session-persistence",
         "--output-format", "stream-json", "--verbose",
         "--max-turns", str(gate.MAX_TURNS),
@@ -308,12 +310,67 @@ def test_the_uv_pin_is_the_ci_pin():
 # ---- L11 seam and L5 run file ----
 
 
-def test_the_credential_seam_refuses_so_no_session_starts(tmp_path, monkeypatch):
+def _main_without_root(tmp_path, monkeypatch, version_reason=None):
+    calls = []
     monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: calls.append("kill") or 0)
+    monkeypatch.setattr(
+        gate, "check_claude_version", lambda *a, **k: calls.append("version") or version_reason
+    )
     monkeypatch.setattr(gate, "supervise", lambda *a, **k: pytest.fail("a session started"))
-    assert gate.main() == gate.EXIT_CREDENTIAL
+    rc = gate.main()
     (run,) = (tmp_path / "runs").iterdir()
-    assert json.loads(run.read_text())["launcher"]["refused"] == "credential"
+    return rc, [json.loads(x)["launcher"] for x in run.read_text().splitlines()], calls
+
+
+def test_the_credential_seam_refuses_so_no_session_starts(tmp_path, monkeypatch):
+    rc, notes, calls = _main_without_root(tmp_path, monkeypatch)
+    assert rc == gate.EXIT_CREDENTIAL
+    assert calls == ["kill", "version"]
+    assert notes[-1]["refused"] == "credential"
+
+
+def test_a_wrong_claude_version_stops_before_the_credential_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "credential_step", lambda env: pytest.fail("credential read"))
+    rc, notes, _ = _main_without_root(tmp_path, monkeypatch, "claude version: expected x")
+    assert rc == gate.EXIT_VERSION
+    assert notes[-1] == {"refused": "version", "reason": "claude version: expected x"}
+
+
+def _version_script(tmp_path, says: str, code: int = 0) -> Path:
+    script = tmp_path / "claude-version"
+    script.write_text(f"#!/bin/sh\necho '{says}'\nexit {code}\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_the_pinned_claude_version_passes(tmp_path):
+    claude = _version_script(tmp_path, f"{gate.CLAUDE_VERSION} (Claude Code)")
+    assert gate.check_claude_version(claude, {"PATH": "/usr/bin:/bin"}, drop=False) is None
+
+
+@pytest.mark.parametrize(
+    ("says", "code"),
+    [("2.1.318 (Claude Code)", 0), ("", 0), ("2.1.317 (Claude Code)", 1)],
+    ids=["other", "empty", "failed"],
+)
+def test_another_claude_version_is_refused(tmp_path, says, code):
+    claude = _version_script(tmp_path, says, code)
+    reason = gate.check_claude_version(claude, {"PATH": "/usr/bin:/bin"}, drop=False)
+    assert reason is not None and gate.CLAUDE_VERSION in reason
+
+
+def test_a_missing_claude_is_refused(tmp_path):
+    reason = gate.check_claude_version(tmp_path / "nope", {}, drop=False)
+    assert reason == "claude --version failed: FileNotFoundError"
+
+
+def test_leftovers_are_killed_by_the_bot_users_uid(monkeypatch):
+    seen = []
+    monkeypatch.setattr(gate.subprocess, "run", lambda argv, **k: seen.append(argv) or
+                        subprocess.CompletedProcess(argv, 1))  # fmt: skip
+    gate.kill_leftovers()
+    assert seen == [["/usr/bin/pkill", "-KILL", "-U", "mailbox-autopilot-bot"]]
 
 
 def test_the_run_file_is_owner_only(tmp_path):
@@ -381,3 +438,13 @@ def test_launch_starts_the_gate_from_an_empty_environment(tmp_path):
     assert "--offline" in seen["argv"] and seen["argv"][-1].endswith("/launcher/gate.py")
     assert not any(k.startswith(("ANTHROPIC", "UV_INDEX")) for k in seen["env"])
     assert seen["env"]["UV_PYTHON_DOWNLOADS"] == "never"
+
+
+def test_the_bot_settings_turn_auto_memory_off_and_deny_built_in_tools():
+    settings = json.loads((LAUNCHER / "settings.json").read_text())
+    assert settings["autoMemoryEnabled"] is False
+    assert {"Bash", "Edit", "Read", "WebFetch", "WebSearch", "Write"} <= set(
+        settings["permissions"]["deny"]
+    )
+    assert "allow" not in settings["permissions"]
+    assert "hooks" not in settings and "env" not in settings

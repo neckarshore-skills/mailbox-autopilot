@@ -33,8 +33,12 @@ PINNED_TOOLS = frozenset({f"mcp__{SERVER}__search", f"mcp__{SERVER}__read"})
 
 # ---- proposed paths and bounds (the builder proposes, the PR names them) ----
 BASE = Path("/Library/Application Support/mailbox-autopilot")
-CLAUDE = Path("/usr/local/mailbox-autopilot/claude/bin/claude")
+# L4: the version is a literal here, like the uv pin in launch.sh. install.sh downloads
+# exactly this release and checks it against the signed manifest's SHA256.
+CLAUDE_VERSION = "2.1.317"
+CLAUDE = Path("/usr/local/mailbox-autopilot/claude/claude")
 MCP_CONFIG = BASE / "launcher" / "host.json"
+SETTINGS = BASE / "launcher" / "settings.json"  # the bot's own settings, not managed (PR)
 PROMPT_FILE = BASE / "launcher" / "prompt.txt"
 RUNS_DIR = BASE / "runs"  # L5: owner-only files, one per run
 WORK_DIR = BASE / "launcher" / "empty"  # 5c: no CLAUDE.md, no .claude/
@@ -54,21 +58,55 @@ EXIT_NO_INIT = 12  # no first event in time, or the stream ended before one
 EXIT_WALL_CLOCK = 13  # L12
 EXIT_CHILD = 14  # claude ended non-zero
 EXIT_TERMINATED = 15  # SIGTERM, from launchd or root; the session was killed first
+EXIT_VERSION = 16  # L4: the installed claude is not CLAUDE_VERSION
 
 
 def build_env() -> dict[str, str]:
     """L1: the child's environment is built from nothing. No ANTHROPIC_*, no apiKeyHelper
-    source, no ANTHROPIC_BASE_URL can come through, because nothing is copied."""
+    source, no ANTHROPIC_BASE_URL can come through, because nothing is copied.
+    DISABLE_UPDATES blocks auto-updates, `claude update` and `claude install` (L4);
+    DISABLE_AUTOUPDATER alone leaves the last two open (docs, setup)."""
     return {
         "PATH": "/usr/bin:/bin",
         "HOME": str(BOT_HOME),
         "LANG": "en_US.UTF-8",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "DISABLE_UPDATES": "1",
     }
 
 
-def build_argv(claude: Path = CLAUDE, mcp_config: Path = MCP_CONFIG) -> list[str]:
+def check_claude_version(claude: Path, env: dict[str, str], *, drop: bool = True) -> str | None:
+    """L4: None when `claude --version` names CLAUDE_VERSION. Run as the bot user, with
+    the same empty environment, before anything that could reach the network."""
+    kwargs = {"user": BOT_USER, "group": BOT_GROUP, "extra_groups": [BOT_GROUP]} if drop else {}
+    try:
+        done = subprocess.run(
+            [str(claude), "--version"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            **kwargs,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"claude --version failed: {type(exc).__name__}"
+    found = done.stdout.decode("utf-8", "replace").split()[:1]
+    if done.returncode != 0 or found != [CLAUDE_VERSION]:
+        return f"claude version: expected {CLAUDE_VERSION}, found {' '.join(found) or 'nothing'}"
+    return None
+
+
+def kill_leftovers(user: str = BOT_USER) -> int:
+    """A SIGKILL to the launcher skips every `finally`, and launchd does not reap a child in
+    its own process group. So each run first kills whatever the bot user still runs: an
+    orphan lives at most until the next run, and two sessions never overlap."""
+    return subprocess.run(["/usr/bin/pkill", "-KILL", "-U", user], check=False).returncode
+
+
+def build_argv(
+    claude: Path = CLAUDE, mcp_config: Path = MCP_CONFIG, settings: Path = SETTINGS
+) -> list[str]:
     """L1, L2, L8, L12: the literal invocation. The prompt goes in on stdin, so no
     variadic flag can swallow it. Never --bare, never a permission bypass."""
     return [
@@ -84,6 +122,8 @@ def build_argv(claude: Path = CLAUDE, mcp_config: Path = MCP_CONFIG) -> list[str
         "--disable-slash-commands",
         "--setting-sources",
         "",
+        "--settings",
+        str(settings),
         "--no-session-persistence",
         "--output-format",
         "stream-json",
@@ -274,6 +314,10 @@ def _watch(proc, prompt: str, out, wall_clock_s: float, init_timeout_s: float) -
 
 def main() -> int:
     with open_run_file() as out:
+        note(out, leftovers_killed=kill_leftovers() == 0)
+        if (reason := check_claude_version(CLAUDE, build_env())) is not None:
+            note(out, refused="version", reason=reason)
+            return EXIT_VERSION
         try:
             env = credential_step(build_env())
         except CredentialUnavailable as exc:
