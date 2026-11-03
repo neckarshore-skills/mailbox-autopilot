@@ -264,7 +264,7 @@ def _caps(value) -> dict:
 def _keep(value) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
         raise _invalid("keep must be a list of addresses and @domains")
-    if any(IDNA_2003_CHANGES & set(v) for v in value):  # `straße.de` would list `strasse.de`
+    if any(IDNA_2003_CHANGES & set(v) for v in value):  # `straße.example` lists `strasse.example`
         raise _invalid("keep has a domain that needs its xn-- form")
     try:
         parse_keep(value)
