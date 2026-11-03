@@ -25,6 +25,7 @@ _HEAD_PART = "BODY.PEEK[HEADER]"
 # quoted strings are removed before matching so a header value cannot either.
 _UID_RE = re.compile(rb"(?:\(|\s)UID (\d+)")
 _INTERNALDATE_RE = re.compile(rb'(?:\(|\s)INTERNALDATE "([^"]+)"')
+_SIZE_RE = re.compile(rb"(?:\(|\s)RFC822\.SIZE (\d+)")
 _QUOTED_RE = re.compile(rb'"(?:[^"\\]|\\.)*"')
 _BODY_QUOTED_RE = re.compile(rb'(?:\(|\s)BODY\[[^\]]*\] ("(?:[^"\\]|\\.)*"|NIL)', re.IGNORECASE)
 _BODY_ITEM_RE = re.compile(rb"(?:\(|\s)BODY\[", re.IGNORECASE)
@@ -53,6 +54,7 @@ class _Row:
     arrived: datetime.datetime | None  # INTERNALDATE
     header: bytes  # the fetched header block (Date only, or the full header)
     has_header: bool = True  # whether the server sent the BODY[...] item at all
+    size: int | None = None  # RFC822.SIZE, when it was asked for
 
 
 def uid_set(uids) -> str:
@@ -169,9 +171,12 @@ def _parse_fetch(data, wanted: set[str]) -> list[_Row]:
         uid = uid_m.group(1).decode()
         idate = _INTERNALDATE_RE.search(meta)
         arrived = _parse_internaldate(idate.group(1)) if idate else None
-        rec = merged.setdefault(uid, {"arrived": None, "header": None})
+        size_m = _SIZE_RE.search(bare)
+        rec = merged.setdefault(uid, {"arrived": None, "header": None, "size": None})
         if rec["arrived"] is None:
             rec["arrived"] = arrived
+        if rec["size"] is None and size_m:
+            rec["size"] = int(size_m.group(1))
         if header_item is not None and not rec["header"]:
             rec["header"] = header_item
     return [
@@ -180,6 +185,7 @@ def _parse_fetch(data, wanted: set[str]) -> list[_Row]:
             arrived=rec["arrived"],
             header=rec["header"] or b"",
             has_header=rec["header"] is not None,
+            size=rec["size"],
         )
         for uid, rec in merged.items()
     ]
