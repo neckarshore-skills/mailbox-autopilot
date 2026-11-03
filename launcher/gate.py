@@ -45,7 +45,6 @@ WORK_DIR = BASE / "launcher" / "empty"  # 5c: no CLAUDE.md, no .claude/
 BOT_USER = "mailbox-autopilot-bot"
 BOT_GROUP = "mailbox-autopilot-bot"
 BOT_HOME = Path("/Users/mailbox-autopilot-bot")
-OWNER_USER = None  # set at provisioning (slice 2); None leaves the run file root-only
 MAX_TURNS = 12  # L12
 WALL_CLOCK_S = 300  # L12: the whole session
 INIT_TIMEOUT_S = 60  # the first event must be system/init
@@ -167,17 +166,17 @@ class CredentialUnavailable(Exception):
     pass
 
 
-def open_run_file(runs_dir: Path | None = None, owner: str | None = OWNER_USER):
-    """L5: one file per run, created 0600 and handed to the owner. The bot never holds it:
-    root reads the child's stdout and writes here. The base directory is provisioned."""
+def open_run_file(runs_dir: Path | None = None):
+    """L5: one file per run, created 0600 and handed to whoever owns the runs directory.
+    install.sh gives that directory to the owner, so no user name is written into this
+    public file. The bot never holds a run file: root reads the child's stdout and writes."""
     runs_dir = RUNS_DIR if runs_dir is None else runs_dir
     runs_dir.mkdir(mode=0o700, exist_ok=True)
     name = datetime.now(UTC).strftime("run-%Y%m%dT%H%M%SZ.jsonl")
     fd = os.open(runs_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    if owner is not None:
-        import pwd
-
-        os.fchown(fd, pwd.getpwnam(owner).pw_uid, -1)
+    owner = runs_dir.stat().st_uid
+    if owner != os.geteuid():
+        os.fchown(fd, owner, -1)
     return os.fdopen(fd, "w", encoding="utf-8")
 
 
