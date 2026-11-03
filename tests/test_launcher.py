@@ -448,3 +448,29 @@ def test_the_bot_settings_turn_auto_memory_off_and_deny_built_in_tools():
     )
     assert "allow" not in settings["permissions"]
     assert "hooks" not in settings and "env" not in settings
+
+
+def test_launch_never_follows_a_link_planted_in_the_owners_runs_directory(tmp_path):
+    """The runs directory belongs to the owner, and launch.sh runs as root: a symlink
+    under the refusal file's name must not make root write through it."""
+    import time
+
+    target = tmp_path / "elsewhere"
+    target.write_text("untouched\n")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    now = int(time.time())
+    for t in range(now - 1, now + 5):
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(t))
+        (runs / f"run-{stamp}-uv.jsonl").symlink_to(target)
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/bash\necho "uv 0.0.1"\n')
+    uv.chmod(0o755)
+    script = (LAUNCHER / "launch.sh").read_text()
+    script = re.sub(r'^UV=".*"$', f'UV="{uv}"', script, flags=re.M)
+    script = re.sub(r'^RUNS_DIR=".*"$', f'RUNS_DIR="{runs}"', script, flags=re.M)
+    copy = tmp_path / "launch.sh"
+    copy.write_text(script)
+    proc = subprocess.run(["bash", str(copy)], capture_output=True, text=True)
+    assert proc.returncode == 20
+    assert target.read_text() == "untouched\n"

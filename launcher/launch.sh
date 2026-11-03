@@ -17,11 +17,16 @@ RUNS_DIR="/Library/Application Support/mailbox-autopilot/runs"
 # ---- end pinned ----
 
 refuse() { # one line to the run file (L5) and to stderr (L13), then a non-zero exit
-  local line
+  local line file owner
   line="{\"launcher\": {\"refused\": \"uv\", \"reason\": \"$1\"}}"
   printf '%s\n' "$line" >&2
-  if [ -d "$RUNS_DIR" ]; then
-    (umask 077 && printf '%s\n' "$line" >"$RUNS_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-uv.jsonl")
+  if [ -d "$RUNS_DIR" ] && [ ! -L "$RUNS_DIR" ]; then
+    # The runs directory belongs to the owner, so root never follows or overwrites a name
+    # in it: noclobber opens with O_EXCL, which also refuses a planted symlink.
+    file="$RUNS_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-uv.jsonl"
+    (set -o noclobber && umask 077 && printf '%s\n' "$line" >"$file") || exit 20
+    owner="$(stat -c %u "$RUNS_DIR" 2>/dev/null || stat -f %u "$RUNS_DIR")" # GNU, then BSD
+    chown -h "$owner" "$file" 2>/dev/null || true
   fi
   exit 20
 }
