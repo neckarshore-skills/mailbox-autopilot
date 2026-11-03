@@ -31,11 +31,21 @@ def _load_gate():
 
 gate = _load_gate()
 
+# Captured on the laptop, Claude Code 2.1.317, from build_argv() with the launcher's
+# environment and a throwaway stdio server named `mailbox` offering search and read.
+# Session id, paths and capability flags removed; the fields the gate reads are verbatim.
 GOOD_INIT = {
     "type": "system",
     "subtype": "init",
-    "tools": ["mcp__mailbox__search", "mcp__mailbox__read"],
-    "mcp_servers": [{"name": "mailbox", "status": "connected"}],
+    "tools": ["mcp__mailbox__read", "mcp__mailbox__search"],
+    "mcp_servers": [{"name": "mailbox", "status": "connected", "source": "dynamic"}],
+    "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
+    "skills": [],
+    "slash_commands": [],
+    "permissionMode": "default",
+    "apiKeySource": "none",
+    "analytics_disabled": True,
+    "claude_code_version": "2.1.317",
 }
 
 
@@ -56,18 +66,39 @@ def _fake_claude(tmp_path: Path, events: list, after: str = "") -> Path:
     return script
 
 
-SURVIVE = "time.sleep(1.0); pathlib.Path(__file__).with_name('survived').write_text('x')"
+SURVIVE = "time.sleep(2.0); pathlib.Path(__file__).with_name('survived').write_text('x')"
+# A grandchild in the same process group, standing in for the MCP host, that outlives claude.
+ORPHAN = (
+    "import subprocess; subprocess.Popen([sys.executable, '-c', "
+    "'import time, pathlib, sys; time.sleep(2.0); pathlib.Path(sys.argv[1]).write_text(\"x\")', "
+    "str(pathlib.Path(__file__).with_name('survived'))], stdout=subprocess.DEVNULL)"
+)
 
 
-def _run(tmp_path, events, after="", **kw):
+def _run(tmp_path, events, after="", out=None, **kw):
     claude = _fake_claude(tmp_path, events, after)
     out_path = tmp_path / "run.jsonl"
-    with out_path.open("w") as out:
+    with out_path.open("w") as real:
         rc = gate.supervise(
-            [str(claude)], {"PATH": "/usr/bin:/bin"}, "prompt", out, drop=False, cwd=tmp_path, **kw
+            [str(claude)],
+            {"PATH": "/usr/bin:/bin"},
+            "prompt",
+            out or real,
+            drop=False,
+            cwd=tmp_path,
+            **kw,
         )
     lines = [json.loads(x) for x in out_path.read_text().splitlines()]
-    return rc, lines, (tmp_path / "survived").exists()
+    # Nothing waits for a killed child, so a survivor shows only once its sleep is over.
+    survived = _survived_later(tmp_path) if "survived" in after else False
+    return rc, lines, survived
+
+
+def _survived_later(tmp_path) -> bool:
+    import time
+
+    time.sleep(2.5)
+    return (tmp_path / "survived").exists()
 
 
 # ---- L8, the init gate ----
@@ -136,10 +167,17 @@ def test_a_stream_that_ends_without_init_is_refused(tmp_path):
 
 
 def test_the_wall_clock_kills_a_session_that_passed_the_gate(tmp_path):
-    rc, lines, survived = _run(tmp_path, [GOOD_INIT], after=SURVIVE, wall_clock_s=0.4)
+    rc, lines, survived = _run(tmp_path, [GOOD_INIT], after=SURVIVE, wall_clock_s=1.5)
     assert rc == gate.EXIT_WALL_CLOCK
     assert lines[0] == GOOD_INIT
     assert lines[-1]["launcher"]["refused"] == "wall_clock"
+    assert not survived
+
+
+def test_the_wall_clock_holds_after_the_child_closes_its_stdout(tmp_path):
+    after = "import os; os.close(1); " + SURVIVE
+    rc, lines, survived = _run(tmp_path, [GOOD_INIT], after=after, wall_clock_s=1.5)
+    assert rc == gate.EXIT_WALL_CLOCK
     assert not survived
 
 
@@ -147,6 +185,59 @@ def test_a_child_that_fails_is_reported(tmp_path):
     rc, lines, _ = _run(tmp_path, [GOOD_INIT], after="sys.exit(3)")
     assert rc == gate.EXIT_CHILD
     assert lines[-1] == {"launcher": {"child_exit": 3}}
+
+
+def test_a_last_line_without_newline_still_reaches_the_run_file(tmp_path):
+    after = 'sys.stdout.write(\'{"type": "result"}\'); sys.stdout.flush()'
+    rc, lines, _ = _run(tmp_path, [GOOD_INIT], after=after)
+    assert rc == gate.EXIT_OK
+    assert lines[-1] == {"type": "result"}
+
+
+# ---- fail closed: whatever ends the launcher ends the session ----
+
+
+def test_a_host_that_outlives_a_clean_session_is_killed(tmp_path):
+    rc, _, _ = _run(tmp_path, [GOOD_INIT], after=ORPHAN)
+    assert rc == gate.EXIT_OK
+    assert not _survived_later(tmp_path)
+
+
+class _BrokenRunFile:
+    """A run file that takes the init line and then fails, like a full disk."""
+
+    def __init__(self):
+        self.writes = 0
+
+    def write(self, text):
+        self.writes += 1
+        if self.writes > 1:
+            raise OSError(28, "No space left on device")
+
+    def flush(self):
+        pass
+
+
+def test_an_error_in_the_launcher_kills_the_session(tmp_path):
+    with pytest.raises(OSError):
+        _run(tmp_path, [GOOD_INIT, {"type": "assistant"}], after=ORPHAN + "; " + SURVIVE,
+             out=_BrokenRunFile())  # fmt: skip
+    assert not _survived_later(tmp_path)
+
+
+def test_sigterm_to_the_launcher_kills_the_session(tmp_path):
+    import signal
+    import threading
+
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGTERM))
+    timer.start()
+    try:
+        with pytest.raises(gate.Terminated):
+            _run(tmp_path, [GOOD_INIT], after=ORPHAN + "; " + SURVIVE)
+    finally:
+        timer.cancel()
+    assert signal.getsignal(signal.SIGTERM) is not gate._terminated
+    assert not _survived_later(tmp_path)
 
 
 # ---- L1, L2, environment and argv ----

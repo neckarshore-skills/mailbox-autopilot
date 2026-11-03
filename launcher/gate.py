@@ -53,6 +53,7 @@ EXIT_GATE = 11  # L8: the first event is not an init offering exactly the pinned
 EXIT_NO_INIT = 12  # no first event in time, or the stream ended before one
 EXIT_WALL_CLOCK = 13  # L12
 EXIT_CHILD = 14  # claude ended non-zero
+EXIT_TERMINATED = 15  # SIGTERM, from launchd or root; the session was killed first
 
 
 def build_env() -> dict[str, str]:
@@ -148,8 +149,10 @@ def note(out, **fields) -> None:
 def _kill(proc: subprocess.Popen) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    except (ProcessLookupError, PermissionError):
+        pass  # macOS answers EPERM, not ESRCH, for a group with no live member left
+    if proc.poll() is None:
+        proc.kill()
     proc.wait()
 
 
@@ -165,40 +168,83 @@ def supervise(
     init_timeout_s: float = INIT_TIMEOUT_S,
 ) -> int:
     """Start the child, gate on its first event, copy every line to the run file, and
-    kill it at the wall clock. `drop=False` only in tests, which do not run as root."""
+    kill it at the wall clock. `drop=False` only in tests, which do not run as root.
+
+    Fail closed: the child runs in its own process group, so whatever ends this function
+    (a return, an exception, SIGTERM from launchd) kills that whole group on the way out,
+    the MCP host included."""
     kwargs = {}
     if drop:
         # extra_groups is required: without it the child keeps root's supplementary groups.
         kwargs = {"user": BOT_USER, "group": BOT_GROUP, "extra_groups": [BOT_GROUP]}
-    proc = subprocess.Popen(
-        argv,
-        env=env,
-        cwd=cwd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        process_group=0,
-        close_fds=True,
-        **kwargs,
-    )
-    proc.stdin.write(prompt.encode())
-    proc.stdin.close()
+    previous = signal.signal(signal.SIGTERM, _terminated)
+    try:
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            process_group=0,
+            close_fds=True,
+            **kwargs,
+        )
+        try:
+            return _watch(proc, prompt, out, wall_clock_s, init_timeout_s)
+        finally:
+            _kill(proc)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
+
+class Terminated(Exception):
+    pass
+
+
+def _terminated(signum, frame):
+    raise Terminated()
+
+
+def _watch(proc, prompt: str, out, wall_clock_s: float, init_timeout_s: float) -> int:
     start = time.monotonic()
+    try:
+        proc.stdin.write(prompt.encode())
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass  # the child is gone; the stream below says what it left
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
     buf = b""
     gated = False
+
+    def deadline() -> float:
+        return start + (wall_clock_s if gated else min(init_timeout_s, wall_clock_s))
+
+    def expired() -> int:
+        if gated:
+            note(out, refused="wall_clock", seconds=wall_clock_s)
+            return EXIT_WALL_CLOCK
+        note(out, refused="no_init", reason=f"no event within {init_timeout_s}s")
+        return EXIT_NO_INIT
+
+    def take(line: bytes) -> str | None:
+        nonlocal gated
+        if not gated:
+            try:
+                reason = check_init(json.loads(line))
+            except ValueError:
+                reason = "first line is not JSON"
+            if reason is not None:
+                return reason
+            gated = True
+        out.write(line.decode("utf-8", "replace") + "\n")
+        return None
+
     while True:
         now = time.monotonic()
-        limit = start + (wall_clock_s if gated else min(init_timeout_s, wall_clock_s))
-        if now >= limit:
-            _kill(proc)
-            if gated:
-                note(out, refused="wall_clock", seconds=wall_clock_s)
-                return EXIT_WALL_CLOCK
-            note(out, refused="no_init", reason=f"no event within {init_timeout_s}s")
-            return EXIT_NO_INIT
-        if not sel.select(timeout=limit - now):
+        if now >= deadline():
+            return expired()
+        if not sel.select(timeout=deadline() - now):
             continue
         chunk = os.read(proc.stdout.fileno(), 65536)
         if not chunk:
@@ -206,23 +252,20 @@ def supervise(
         buf += chunk
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            if not gated:
-                try:
-                    reason = check_init(json.loads(line))
-                except ValueError:
-                    reason = "first line is not JSON"
-                if reason is not None:
-                    _kill(proc)
-                    note(out, refused="gate", reason=reason)
-                    return EXIT_GATE
-                gated = True
-            out.write(line.decode("utf-8", "replace") + "\n")
+            if (reason := take(line)) is not None:
+                note(out, refused="gate", reason=reason)
+                return EXIT_GATE
         out.flush()
+    if buf and (reason := take(buf)) is not None:
+        note(out, refused="gate", reason=reason)
+        return EXIT_GATE
     if not gated:
-        proc.wait()
         note(out, refused="no_init", reason="stream ended before an init event")
         return EXIT_NO_INIT
-    rc = proc.wait()
+    try:
+        rc = proc.wait(timeout=max(0.0, deadline() - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return expired()
     if rc != 0:
         note(out, child_exit=rc)
         return EXIT_CHILD
@@ -237,7 +280,11 @@ def main() -> int:
             note(out, refused="credential", reason=str(exc))
             return EXIT_CREDENTIAL
         prompt = PROMPT_FILE.read_text(encoding="utf-8")
-        return supervise(build_argv(), env, prompt, out)
+        try:
+            return supervise(build_argv(), env, prompt, out)
+        except Terminated:
+            note(out, refused="terminated")
+            return EXIT_TERMINATED
 
 
 if __name__ == "__main__":
