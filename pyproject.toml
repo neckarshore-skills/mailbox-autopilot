@@ -3,7 +3,7 @@ name = "mailbox-autopilot"
 version = "0.9.0"
 description = "Clean up an IMAP mailbox and draft replies. Never sends mail."
 requires-python = ">=3.11"
-license = "MIT"
+license = "MIT AND MPL-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "German Rauhut", email = "german@rauhut.com"}]
 dependencies = [
