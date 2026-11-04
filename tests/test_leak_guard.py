@@ -672,3 +672,114 @@ def test_the_repository_tree_is_clean():
     assert r.returncode == 0, r.stdout
     scanned = int(re.search(r"(\d+) file\(s\) scanned", r.stdout).group(1))
     assert scanned > 100, r.stdout  # the tree, not an empty list
+
+
+# --- James on #98, U2: a Latin-1 file is read, not skipped -----------------------------
+# One address in each form: ASCII, and an umlaut domain written as a Latin-1 byte (\xfc).
+LATIN1_EML = (
+    b"From: jane.doe@some-company.test\n"
+    b"To: kim@b\xfccher-owner.test\n"
+    b"Subject: Gr\xfc\xdfe aus dem B\xfcro\n"
+)
+
+
+def _diff_adding_bytes(path: bytes, added: list[bytes]) -> bytes:
+    head = (
+        b"diff --git a/" + path + b" b/" + path + b"\n"
+        b"--- /dev/null\n"
+        b"+++ b/" + path + b"\n"
+        b"@@ -0,0 +1," + str(len(added)).encode() + b" @@\n"
+    )
+    return head + b"".join(b"+" + line + b"\n" for line in added)
+
+
+def _run_diff(tmp_path, monkeypatch, diff_bytes):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    diff_file = tmp_path / "pr.diff"
+    diff_file.write_bytes(diff_bytes)
+    return diff_file
+
+
+def test_a_latin1_file_is_scanned_in_file_mode(tmp_path):
+    p = tmp_path / "old.eml"
+    p.write_bytes(LATIN1_EML)
+    hits = lg.scan_files([p], [], [])
+    assert [(h.line, h.label) for h in hits] == [(1, "email"), (2, "email")]
+
+
+def test_a_latin1_file_fails_the_tree(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"ok.py": "x = 1\n"})
+    (tmp_path / "fixtures").mkdir()
+    (tmp_path / "fixtures" / "old.eml").write_bytes(LATIN1_EML)
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--tree"]) == 1
+    out = capsys.readouterr().out
+    assert "fixtures/old.eml:1: email" in out
+    assert "fixtures/old.eml:2: email" in out
+
+
+def test_a_utf8_address_next_to_a_stray_latin1_byte_still_hits(tmp_path):
+    # a mostly-UTF-8 file with one Latin-1 byte: the valid lines keep their UTF-8 reading
+    p = tmp_path / "mixed.md"
+    p.write_bytes("kim@straße-owner.test\n".encode() + b"Gr\xfc\xdfe\n")
+    assert [(h.line, h.label) for h in lg.scan_files([p], [], [])] == [(1, "email")]
+
+
+def test_a_latin1_line_that_hits_in_both_readings_is_reported_once(tmp_path):
+    p = tmp_path / "once.eml"
+    p.write_bytes(b"To: jane.doe@some-company.test (B\xfcro)\n")
+    assert [(h.line, h.label) for h in lg.scan_files([p], [], [])] == [(1, "email")]
+
+
+def test_a_latin1_added_line_hits_in_diff_mode(tmp_path, monkeypatch, capsys):
+    diff = _diff_adding_bytes(b"fixtures/old.eml", [b"To: kim@b\xfccher-owner.test"])
+    rc = lg.main(["--diff", str(_run_diff(tmp_path, monkeypatch, diff))])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "fixtures/old.eml:1: email" in out
+    assert "1 added line(s) scanned" in out  # the second reading is not a second line
+
+
+def test_an_ascii_added_line_hits_in_diff_mode(tmp_path, monkeypatch, capsys):
+    # the plain case end to end: the second reading must not replace the first
+    diff = _diff_adding_bytes(b"docs/notes.md", [b"Contact: jane.doe@some-company.test"])
+    rc = lg.main(["--diff", str(_run_diff(tmp_path, monkeypatch, diff))])
+    assert rc == 1
+    assert "docs/notes.md:1: email" in capsys.readouterr().out
+
+
+def test_the_replacement_reading_still_counts_in_diff_mode(tmp_path, monkeypatch, capsys):
+    # Latin-1 glues \xfc to the IBAN ("üDE89..."), so `\b` fails there; the replacement
+    # reading ("�DE89...") keeps the boundary. A hit in either reading counts.
+    diff = _diff_adding_bytes(b"notes.txt", [b"\xfcDE89370400440532013000"])
+    rc = lg.main(["--diff", str(_run_diff(tmp_path, monkeypatch, diff))])
+    assert rc == 1
+    assert "notes.txt:1: iban" in capsys.readouterr().out
+
+
+def test_a_binary_path_in_a_diff_gets_no_latin1_reading(tmp_path, monkeypatch, capsys):
+    # A NUL byte marks binary content, as git itself decides. Read as Latin-1, random bytes
+    # form an address about 20 times as often as in the replacement reading (8 MB of
+    # os.urandom: 20 email hits against 1), so binary content keeps today's reading only.
+    diff = _diff_adding_bytes(b"img/shot.png", [b"\x89PNG\x00\x00", b"kim@b\xfccher-owner.test"])
+    rc = lg.main(["--diff", str(_run_diff(tmp_path, monkeypatch, diff))])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 added line(s) scanned, 0 hit(s)" in out
+
+
+def test_tree_mode_names_how_many_binary_files_it_did_not_read(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"ok.py": "x = 1\n"})
+    (tmp_path / "img.png").write_bytes(b"\x89PNG\x00\x00jane@some-company.test")
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--tree"]) == 0
+    assert "2 file(s) scanned, 0 hit(s), 1 binary file(s) not read" in capsys.readouterr().out
