@@ -210,7 +210,7 @@ def auth_set(alias, email, server, port, provider, make_default, password):
 @click.option("--email", "email_flag", default=None, help="Deprecated; use --account.")
 @click.option("--json", "json_mode", is_flag=True)
 def auth_test(account_flag, email_flag, json_mode):
-    """Connect to IMAP, list folders, disconnect."""
+    """Connect to IMAP, count folders, disconnect. Prints no folder name (#82)."""
     try:
         account, creds = resolve_account_and_credentials(
             account_flag=account_flag, email_flag=email_flag
@@ -232,7 +232,8 @@ def auth_test(account_flag, email_flag, json_mode):
 
     try:
         with imap_connect(creds, port=account.port) as mb:
-            folders = [f.name for f in mb.folder.list()]
+            # the count shows the login works; the names are private and stay unprinted (#82)
+            folder_count = len(list(mb.folder.list()))
     except Exception as e:
         _fail(
             {"error_code": "connection_error", "message": str(e)},
@@ -246,7 +247,7 @@ def auth_test(account_flag, email_flag, json_mode):
             "account": account.alias,
             "email": account.email,
             "server": account.server,
-            "folders": folders,
+            "folder_count": folder_count,
             "schema_version": SCHEMA_VERSION,
         },
         json_mode=json_mode,
