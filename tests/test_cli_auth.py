@@ -104,10 +104,12 @@ def test_auth_test_prints_no_folder_name(cfg_env, json_flag):
     ):
         result = CliRunner().invoke(cli, ["auth", "test", "--account", "work", *json_flag])
     assert result.exit_code == 0, result.output
-    assert CANARY not in result.output
-    assert "INBOX" not in result.output
-    assert "folder_count" in result.output
-    assert "3" in result.output
+    for name in names:
+        assert name not in result.output
+    if json_flag:
+        assert json.loads(result.output)["folder_count"] == 3
+    else:
+        assert "folder_count: 3" in result.output.splitlines()
 
 
 def test_auth_test_missing_credentials_exit_3(cfg_env):
