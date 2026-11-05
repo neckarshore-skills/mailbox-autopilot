@@ -14,10 +14,18 @@ The local list itself must never be committed: a tracked `.leakguard-local.txt` 
 mode) or one a diff adds or renames into place (diff mode) is a hit by its path alone,
 with or without a private list in the context. A pattern's own source text copied into
 any other file is a hit too, because a regex rarely matches its own source.
+
+Text that is not UTF-8 is read twice and a hit in either reading counts: the replacement
+reading (an undecodable byte becomes U+FFFD) and a Latin-1 reading of only the bytes UTF-8
+rejects, so a Latin-1 `.eml` is seen (James on #98, U2). Content holding a NUL byte is
+binary, as git decides it, and gets no Latin-1 reading: there random bytes form an address
+about 20 times as often (8 MB of os.urandom: 20 email hits against 1). Tree and file mode
+do not read such a file at all and print how many they left.
 """
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import subprocess
@@ -76,6 +84,15 @@ _C_ESCAPES = {
     "t": 0x09,
     "v": 0x0B,
 }
+
+
+def _latin1_fallback(err: UnicodeDecodeError) -> tuple[str, int]:
+    """Read the bytes UTF-8 rejects as Latin-1, which maps every byte to a character."""
+    return err.object[err.start : err.end].decode("latin-1"), err.end
+
+
+LATIN1_FALLBACK = "leak_guard_latin1"
+codecs.register_error(LATIN1_FALLBACK, _latin1_fallback)
 
 
 class LeakGuardError(Exception):
@@ -356,15 +373,52 @@ def scan_lines(entries, private_patterns, allow) -> list[Hit]:
     return hits
 
 
-def scan_files(paths, private_patterns, allow) -> list[Hit]:
+def _dedupe(hits: list[Hit]) -> list[Hit]:
+    """One hit per line and label, though a line may be scanned in two readings."""
+    return list(dict.fromkeys(hits))
+
+
+def scan_files(paths, private_patterns, allow, not_read=None) -> list[Hit]:
+    """Scan the named files. A file that is not UTF-8 is read in both readings (module
+    docstring); one that also holds a NUL byte is binary, is not read, and its path is
+    appended to `not_read` when the caller passes a list."""
     entries = []
     for p in map(Path, paths):
         try:
-            text = p.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+            data = p.read_bytes()
+        except (FileNotFoundError, IsADirectoryError):
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            if b"\0" in data:
+                if not_read is not None:
+                    not_read.append(str(p))
+                continue
+            for n, raw in enumerate(data.splitlines(), start=1):
+                readings = (raw.decode("utf-8", "replace"), raw.decode("utf-8", LATIN1_FALLBACK))
+                entries += [(str(p), n, line) for line in dict.fromkeys(readings)]
             continue
         entries += [(str(p), n, line) for n, line in enumerate(text.splitlines(), start=1)]
-    return scan_lines(entries, private_patterns, allow)
+    return _dedupe(scan_lines(entries, private_patterns, allow))
+
+
+def latin1_entries(entries, latin) -> list[tuple[str, int, str]]:
+    """The Latin-1 reading of each added line whose text differs from the replacement
+    reading, outside paths whose added lines hold a NUL byte (binary).
+
+    `entries` and `latin` are `added_lines` of the same diff in the two readings. A byte
+    UTF-8 rejects is never a line break, so both parses share one skeleton; if they do
+    not, the guard fails closed rather than pair the wrong lines.
+    """
+    if [n for _, n, _ in entries] != [n for _, n, _ in latin]:
+        raise LeakGuardError("the two readings of the diff disagree on its added lines")
+    binary = {path for path, _, text in entries if "\0" in text}
+    return [
+        (path, n, other)
+        for (path, n, text), (_, _, other) in zip(entries, latin, strict=True)
+        if other != text and path not in binary
+    ]
 
 
 def report(hits: list[Hit]) -> None:
@@ -407,14 +461,18 @@ def main(argv: list[str]) -> int:
         print("leak-guard: private list not available in this context; public patterns only")
     allow_file = Path(".leak-guard-allow")
     allow = parse_allow(allow_file.read_text(encoding="utf-8")) if allow_file.exists() else []
+    not_read: list[str] = []
     if argv[:1] == ["--diff"]:
         # Bytes, not read_text(): --text can force genuinely non-UTF-8 (binary)
         # content into the diff stream, and Path.read_text(encoding="utf-8") would
         # raise before the allowlist is even consulted. errors="replace" turns an
-        # invalid byte into U+FFFD -- a garbled scanned line, never a crash.
-        diff_text = Path(argv[1]).read_bytes().decode("utf-8", errors="replace")
+        # invalid byte into U+FFFD -- a garbled scanned line, never a crash. The
+        # Latin-1 reading is scanned beside it (module docstring).
+        raw = Path(argv[1]).read_bytes()
+        diff_text = raw.decode("utf-8", errors="replace")
         try:
             entries = added_lines(diff_text)
+            extra = latin1_entries(entries, added_lines(raw.decode("utf-8", LATIN1_FALLBACK)))
         except LeakGuardError as exc:
             print(f"leak-guard: {exc}")
             return 1
@@ -423,20 +481,23 @@ def main(argv: list[str]) -> int:
             for p in blocked:
                 print(f"leak-guard: undiffed binary change blocked (not allowlisted): {p}")
             return 1
-        hits = local_list_hits(diff_new_paths(diff_text)) + scan_lines(entries, private, allow)
+        hits = local_list_hits(diff_new_paths(diff_text)) + _dedupe(
+            scan_lines(entries + extra, private, allow)
+        )
         scope = f"{len(entries)} added line(s)"
     elif argv == ["--tree"]:
         files = _tracked_files()
-        hits = local_list_hits(files) + scan_files(files, private, allow)
+        hits = local_list_hits(files) + scan_files(files, private, allow, not_read)
         scope = f"{len(files)} file(s)"
     elif any(a.startswith("--") for a in argv):
         print(f"leak-guard: unknown option {argv[0]!r}; use --diff FILE, --tree or file paths")
         return 2
     else:
-        hits = scan_files(argv, private, allow)
+        hits = scan_files(argv, private, allow, not_read)
         scope = f"{len(argv)} file(s)"
     report(hits)
-    print(f"leak-guard: {scope} scanned, {len(hits)} hit(s)")
+    tail = f", {len(not_read)} binary file(s) not read" if not_read else ""
+    print(f"leak-guard: {scope} scanned, {len(hits)} hit(s){tail}")
     return 1 if hits else 0
 
 
