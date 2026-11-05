@@ -73,7 +73,43 @@ def test_auth_test_success_json(cfg_env):
         assert data["ok"] is True
         assert data["email"] == "a@b.example"
         assert data["account"] == "work"
-        assert "folders" in data
+        assert data["folder_count"] == 2
+
+
+# #82: a login test shows that the connection and the login work, not what the mailbox
+# holds. Folder names are private data, and auth test output is what an owner pastes into
+# a chat or a ticket when something fails. The canary folder must not appear in either mode.
+CANARY = "Canary-Steuerberater-Mueller"
+
+
+@pytest.mark.parametrize("json_flag", [["--json"], []], ids=["json", "plain"])
+def test_auth_test_prints_no_folder_name(cfg_env, json_flag):
+    save_config(
+        Config(
+            default="work",
+            accounts=(Account(alias="work", email="a@b.example", server="imap.ionos.de"),),
+        )
+    )
+    names = ["INBOX", CANARY, "Sent"]
+    entries = []
+    for n in names:
+        f = MagicMock()
+        f.name = n
+        entries.append(f)
+    fake_client = MagicMock()
+    fake_client.__enter__.return_value.folder.list.return_value = entries
+    with (
+        patch("mailbox_cleanup.auth.keyring.get_password", return_value="pw"),
+        patch("mailbox_cleanup.cli.imap_connect", return_value=fake_client),
+    ):
+        result = CliRunner().invoke(cli, ["auth", "test", "--account", "work", *json_flag])
+    assert result.exit_code == 0, result.output
+    for name in names:
+        assert name not in result.output
+    if json_flag:
+        assert json.loads(result.output)["folder_count"] == 3
+    else:
+        assert "folder_count: 3" in result.output.splitlines()
 
 
 def test_auth_test_missing_credentials_exit_3(cfg_env):
