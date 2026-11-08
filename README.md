@@ -225,7 +225,7 @@ If only one account is configured, `--account` can be omitted.
 | Subcommand | Purpose | Required args | Dry-run by default |
 |------------|---------|---------------|---------------------|
 | `auth set` | Create/update account in config.json + write password to Keychain | `--alias=`, `--email=` (interactive password) | n/a |
-| `auth test` | Connect, list folders, disconnect | — (uses default/`--account`) | n/a |
+| `auth test` | Connect, count folders, disconnect (prints no folder name) | — (uses default/`--account`) | n/a |
 | `auth delete` | Remove credentials from Keychain | `--account=` | n/a |
 | `config list` | List configured accounts | — | n/a (read-only) |
 | `config show` | Show one account's connection settings | `<alias>` | n/a (read-only) |
