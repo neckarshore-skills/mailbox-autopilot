@@ -180,3 +180,25 @@ def test_the_check_reads_no_value():
     """The report never holds the value; the check must not start reading one either."""
     source = (PROBE / "check.py").read_text(encoding="utf-8")
     assert "get_password" not in source and "keyring" not in source
+
+
+def _run(*args):
+    return subprocess.run(
+        [sys.executable, str(PROBE / "check.py"), *args], capture_output=True, text=True
+    )
+
+
+def test_a_partial_report_does_not_exit_0(tmp_path):
+    """A sitting that stopped early must not read as passed by its exit code."""
+    partial = _sitting(**{"arm5/drop": None, "arm5/username": None})
+    assert _run(_report(tmp_path, partial)).returncode == 3
+
+
+def test_no_report_and_a_broken_line_are_told_apart_from_a_deviation(tmp_path):
+    assert _run().returncode == 2
+    assert _run(str(tmp_path / "absent.jsonl")).returncode == 2
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text('{"arm": "arm1", "mode": "drop"\n', encoding="utf-8")
+    result = _run(str(broken))
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr

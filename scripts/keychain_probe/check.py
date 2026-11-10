@@ -4,8 +4,10 @@ Runs on Obi's laptop over the report of step 16, not on the target Mac: it reads
 outcome classes and OSStatus codes, never a value. Sitting 1 said `none` for arm 2 where
 the sheet expected locked, and only a person reading the log noticed. This names it.
 
-Usage: python3 check.py <report.jsonl>   exit 1 if any arm deviates, else 0.
+Usage: python3 check.py <report.jsonl>
 One line per expectation: MATCHES, DEVIATES or OPEN (no record yet, the sitting is partial).
+Exit 0 only when every arm matches. 1: an arm deviates. 2: no report, or a line that is not
+JSON. 3: nothing deviates but an arm is open, so the report is not the whole sitting.
 """
 
 import json
@@ -94,12 +96,22 @@ def judge(records: list[dict]) -> list[tuple[str, str, str]]:
 
 
 def main(argv: list[str]) -> int:
-    with open(argv[1], encoding="utf-8") as f:
-        records = [json.loads(line) for line in f if line.strip()]
+    if len(argv) != 2:
+        print("usage: python3 check.py <report.jsonl>", file=sys.stderr)
+        return 2
+    try:
+        with open(argv[1], encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"cannot read the report {argv[1]}: {e}", file=sys.stderr)
+        return 2
     results = judge(records)
     for verdict, key, text in results:
         print(f"{verdict} {key}: {text}")
-    return 1 if any(v == "DEVIATES" for v, _, _ in results) else 0
+    verdicts = {v for v, _, _ in results}
+    if "DEVIATES" in verdicts:
+        return 1
+    return 3 if "OPEN" in verdicts else 0
 
 
 if __name__ == "__main__":
