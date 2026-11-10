@@ -36,7 +36,7 @@ Keep `auth test` output out of the report, the PR, the ticket and any agent sess
 
 ## Before you start
 
-Obi copies the script over from the laptop, from the head James read, so the mode survives, and compares the four sha256 sums on both sides:
+Obi copies the script over from the laptop, from the head James read, so the mode survives, and compares the sha256 sums on both sides (four at 90aff49; `check.py` came later and runs on the laptop, not here):
 
 ```bash
 git archive <head> scripts/keychain_probe | ssh m1 'mkdir ~/keychain-probe && tar -xf - --strip-components=2 -C ~/keychain-probe && shasum -a 256 ~/keychain-probe/*'
@@ -76,7 +76,7 @@ Run the steps top to bottom. Each prints one line per arm. Paste those lines to 
 | 13 | Backup check, then reboot | As in step 8 | `not running`. Back in about 2 minutes |
 | 14 | Arm 5: after one login, reading the login keychain that login made | `sudo ./probe.sh arm5-read` | `no canary`, locked. `NOT ON THE SEARCH LIST` means the login made no login keychain: tell Obi |
 | 15 | Backup proof, as `german`, no `sudo`. It must stay `kickstart`: the backup script started directly in an SSH session fails on the Keychain, which would be a false alarm. Whether `kickstart` works over SSH is unmeasured; if it refuses, do this step at the machine. How long a run takes is unmeasured too; wait for it | `launchctl kickstart gui/501/<label>`, then read `<status file>` | Exit 0, with today's time |
-| 16 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job. Obi takes it |
+| 16 | Keep the evidence | `sudo ./probe.sh report` | One JSON line per job. Obi takes it and runs `python3 scripts/keychain_probe/check.py <report>` on the laptop: one line per arm, `DEVIATES` wherever the report differs from this table's Expected column. Exit 0 only when every arm matches; 1 an arm deviates, 2 the report is unreadable, 3 an arm has no record (`OPEN`, the sitting is partial) |
 | 17 | Clean up | `sudo ./probe.sh cleanup` | Exits 1 and names the report, because it is still there |
 | 18 | After Obi has the report | `sudo rm /Users/Shared/keychain-probe-report.jsonl`, then `sudo ./probe.sh status`, then `cd ~ && rm -r keychain-probe` | The closing line of `status`. A remaining background task record is named instead, see "What stays" |
 | 19 | In `german`'s own Terminal, no `sudo`. It only looks and prints no value | `security find-generic-password -s mailbox-cleanup-probe`, then `echo $?` | `44`: no canary in his keychain. Anything else: tell Obi, and delete nothing |

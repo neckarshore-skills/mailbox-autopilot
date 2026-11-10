@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from imap_tools import AND
 
 from ..folders import resolve_folder
-from .batching import move_in_batches
+from .batching import ensure_scoped_move, move_in_batches
 from .delete import check_expected
 from .filters import parse_age
 
@@ -55,6 +55,9 @@ def run_archive(
     if apply:
         # before the first folder is created: a refused apply leaves the mailbox as it was
         check_expected(expect_count, sum(g["count"] for g in groups))
+        if any(g["uids"] for g in groups):
+            # #80 items 1 and 4: a refused move leaves no empty folder behind
+            ensure_scoped_move(mb, [u for g in groups for u in g["uids"]])
     for g in groups:
         target, uids = g["target"], g["uids"]
         if apply and uids:
