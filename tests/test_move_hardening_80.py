@@ -18,6 +18,7 @@ from mailbox_cleanup.operations.archive import run_archive
 from mailbox_cleanup.operations.batching import (
     MoveUnsupportedError,
     PartialMoveError,
+    ensure_scoped_move,
     move_in_batches,
 )
 
@@ -162,3 +163,28 @@ def test_int_uids_are_refused_as_well():
     with pytest.raises(ValueError):
         move_in_batches(mb, [1], "Trash")
     assert mb.calls == []
+
+
+# --- item 4 before a side effect ----------------------------------------------------
+
+
+def test_archive_refuses_a_bad_uid_before_creating_a_folder():
+    mb = MagicMock()
+    mb.client = SimpleNamespace(capabilities=("IMAP4REV1", "MOVE"), uid=MagicMock())
+    mb.fetch.return_value = [_old_msg("1:*")]
+    mb.folder.list.return_value = []
+    mb.folder.exists.return_value = False
+    with pytest.raises(ValueError):
+        run_archive(
+            mb, folder="INBOX", older_than="12m", apply=True, now=datetime(2026, 5, 4, tzinfo=UTC)
+        )
+    mb.folder.create.assert_not_called()
+    mb.client.uid.assert_not_called()
+
+
+def test_the_preflight_checks_uids_before_capabilities():
+    """unsubscribe calls the preflight before its HTTPS request; a bad UID stops it there."""
+    mb = Recorder(["IMAP4REV1", "MOVE"])
+    with pytest.raises(ValueError):
+        ensure_scoped_move(mb, ["*"])
+    assert ensure_scoped_move(mb, ["7"]) >= {"MOVE"}

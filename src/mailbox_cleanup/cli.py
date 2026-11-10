@@ -1144,7 +1144,7 @@ def unsubscribe_cmd(account_flag, email_flag, folder, sender, apply, json_mode):
                 if uids:
                     # Before any external request: a refused move after a sent unsubscribe
                     # would leave an unaudited action and repeat it on a re-run (James #79).
-                    ensure_scoped_move(mb)
+                    ensure_scoped_move(mb, uids)
                 if https_actions:
                     first = https_actions[0]
                     a = UnsubAction(**{k: first[k] for k in ("kind", "target", "one_click")})

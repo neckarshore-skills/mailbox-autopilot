@@ -50,11 +50,15 @@ def _check(result, what: str) -> None:
         raise RuntimeError(f"{what} failed: {result!r}")
 
 
-def ensure_scoped_move(mb) -> frozenset[str]:
+def ensure_scoped_move(mb, uids: Sequence | None = None) -> frozenset[str]:
     """Raise MoveUnsupportedError unless a move can be scoped to our UIDs.
 
-    Callers with a side effect outside the mailbox (unsubscribe) call this first.
+    Callers with a side effect before the move (archive creates folders, unsubscribe
+    sends a request) call this first and pass their UIDs, so a UID that is not plain
+    digits is refused before that side effect too (#80 item 4).
     """
+    if uids is not None:
+        _require_plain_uids(list(uids))
     caps = capabilities(mb)
     if "MOVE" not in caps and "UIDPLUS" not in caps:
         refresh_error = getattr(mb.client, "capability_refresh_error", None)
@@ -107,8 +111,7 @@ def move_in_batches(mb, uids: Sequence[str], target: str, size: int = BATCH_SIZE
     uids = list(uids)
     if not uids:
         return []
-    _require_plain_uids(uids)
-    caps = ensure_scoped_move(mb)
+    caps = ensure_scoped_move(mb, uids)
     moved: list[str] = []
     for i in range(0, len(uids), size):
         batch = uids[i : i + size]
