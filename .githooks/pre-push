@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# pre-push: the leak guard on the push path (this repository is public).
+#
+# WHY: in a public repository the push is already the publication. The pull-request
+# check (.github/workflows/leak-guard.yml) stops a merge, not a push; b325156 went out
+# with the guard red because nothing ran before the push.
+#
+# WHAT: every commit this push sends that origin does not have yet is scanned on its
+# own (`git diff-tree` against its first parent), so an address added in one commit and
+# removed in the next is still caught: that history is published too.
+#
+# FAILS CLOSED: no python3, no scripts/leak_guard.py, a parse error or any hit -> exit 1.
+# Every guard call is checked as `cmd || exit 1`; never `! cmd` under `set -e`, never piped.
+#
+# INSTALL (once per clone): git config core.hooksPath .githooks
+# Skippable with `git push --no-verify`; the pull-request check stays the enforced gate.
+
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$repo_root" || exit 1
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "pre-push: python3 not found; refusing the push (the leak guard cannot run)." >&2
+  exit 1
+fi
+if [[ ! -f scripts/leak_guard.py ]]; then
+  echo "pre-push: scripts/leak_guard.py not found; refusing the push." >&2
+  exit 1
+fi
+
+tmp="$(mktemp -d)" || exit 1
+trap 'rm -rf "$tmp"' EXIT
+
+scanned=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [[ -z "${local_sha:-}" ]] && continue
+  [[ "$local_sha" =~ ^0+$ ]] && continue             # branch deletion: nothing is sent
+  commits="$(git rev-list "$local_sha" --not --remotes=origin)" || exit 1
+  for c in $commits; do
+    git diff-tree --no-commit-id -p -U0 --no-color --text --root -m --first-parent \
+      --diff-filter=ACMRT "$c" > "$tmp/commit.diff" || exit 1
+    echo "pre-push: leak guard on $(git log -1 --format='%h %s' "$c")"
+    python3 scripts/leak_guard.py --diff "$tmp/commit.diff" || {
+      echo "pre-push: leak guard red on commit $c; push refused. Rewrite that commit, do not --no-verify." >&2
+      exit 1
+    }
+    scanned=$((scanned + 1))
+  done
+done
+
+echo "pre-push: leak guard green on $scanned new commit(s)."
+exit 0
