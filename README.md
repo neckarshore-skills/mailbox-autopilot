@@ -518,6 +518,16 @@ CI runs the same on every push. Greenmail starts on port 3143 (plain IMAP) + 302
 
 > **Note:** a bare `uv run pytest` starts the Greenmail container when Docker is running. To stay without Docker, run `uv run pytest -m "not integration"`: the unit tests pass, and nine older CLI tests that are not marked as integration report an error because they need the container. CI runs everything.
 
+## Leak guard before the push
+
+This repository is public, so a push is already a publication. Once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+`.githooks/pre-push` then runs `scripts/leak_guard.py` on every commit the push would send that `origin` does not have yet, one commit at a time, and refuses the push on any hit or when the guard cannot run. `git push --no-verify` skips it; the leak-guard check on the pull request stays the enforced gate. `tests/test_pre_push_hook.py` covers the hook.
+
 ## Estate test-scope stats
 
 This repo is a **producer** for the neckarshore.ai estate test-count. On every `push:main`, CI counts the two gated pytest suites (unit + the live-Greenmail integration suite) from pytest's own `--collect-only` reporter — never grep — and publishes a contract-valid `stats.json` to the dedicated [`stats-data`](../../tree/stats-data/stats.json) branch: a single-file data branch, **not** `main`. `main` is a protected branch (a bot cannot push to it without weakening its protection), so the machine artifact lives on its own unprotected branch instead. The neckarshore.ai aggregator fetches it via `contents/stats.json?ref=stats-data`. Contract: [`stats-json-contract.md`](https://github.com/neckarshore-ai/neckarshore-planning/blob/main/docs/reference/stats-json-contract.md).
