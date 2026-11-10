@@ -13,6 +13,7 @@ decides a second time, on the raw case-sensitive capability list, and its fallba
 the unscoped EXPUNGE (James on #79). One decision, made here.
 """
 
+import re
 from collections.abc import Sequence
 
 from imap_tools.utils import encode_folder
@@ -56,11 +57,27 @@ def ensure_scoped_move(mb) -> frozenset[str]:
     """
     caps = capabilities(mb)
     if "MOVE" not in caps and "UIDPLUS" not in caps:
+        refresh_error = getattr(mb.client, "capability_refresh_error", None)
+        if refresh_error:
+            raise MoveUnsupportedError(
+                f"The capability refresh after login failed ({refresh_error}), so MOVE and "
+                "UIDPLUS could not be confirmed; nothing was moved. Try again."
+            )
         raise MoveUnsupportedError(
             "The server supports neither MOVE nor UIDPLUS; a move could remove messages "
             "outside the selection, so nothing was moved."
         )
     return caps
+
+
+_UID_RE = re.compile(r"[0-9]+")
+
+
+def _require_plain_uids(uids: list) -> None:
+    """The UID set is joined from these strings; `*` or a range would widen it (#80 item 4)."""
+    for u in uids:
+        if not isinstance(u, str) or not _UID_RE.fullmatch(u):
+            raise ValueError(f"not a plain UID: {u!r}; nothing was moved")
 
 
 def _move_batch(mb, batch: list[str], target: str, caps: frozenset[str]) -> None:
@@ -70,7 +87,19 @@ def _move_batch(mb, batch: list[str], target: str, caps: frozenset[str]) -> None
         return
     _check(mb.client.uid("COPY", uidset, encode_folder(target)), "UID COPY")
     _check(mb.client.uid("STORE", uidset, "+FLAGS.SILENT", r"(\Deleted)"), "STORE \\Deleted")
-    _check(mb.client.uid("EXPUNGE", uidset), "UID EXPUNGE")
+    try:
+        _check(mb.client.uid("EXPUNGE", uidset), "UID EXPUNGE")
+    except Exception as e:
+        # #80 item 3: without a rollback our UIDs stay \Deleted here and a re-run copies again
+        try:
+            _check(mb.client.uid("STORE", uidset, "-FLAGS.SILENT", r"(\Deleted)"), "rollback")
+            state = r"the \Deleted flag was removed again"
+        except Exception:
+            state = r"the rollback failed too, so they are still marked \Deleted here"
+        raise RuntimeError(
+            f"UID EXPUNGE failed ({e}); {state}. Copies of these {len(batch)} messages "
+            f"stay in {target}, so a re-run would copy them again."
+        ) from e
 
 
 def move_in_batches(mb, uids: Sequence[str], target: str, size: int = BATCH_SIZE) -> list[str]:
@@ -78,6 +107,7 @@ def move_in_batches(mb, uids: Sequence[str], target: str, size: int = BATCH_SIZE
     uids = list(uids)
     if not uids:
         return []
+    _require_plain_uids(uids)
     caps = ensure_scoped_move(mb)
     moved: list[str] = []
     for i in range(0, len(uids), size):

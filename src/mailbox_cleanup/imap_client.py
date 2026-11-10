@@ -27,11 +27,16 @@ def _refresh_capabilities(mb) -> None:
         return
     try:
         typ, data = client.capability()
-    except Exception:
+    except Exception as e:
+        # kept on the client so a later refusal names the real cause (#80 item 2)
+        client.capability_refresh_error = f"{type(e).__name__}: {e}"
         return
     if typ == "OK" and data and data[-1]:
         raw = data[-1].decode() if isinstance(data[-1], bytes) else str(data[-1])
         client.capabilities = tuple(raw.upper().split())
+        client.capability_refresh_error = None
+    else:
+        client.capability_refresh_error = f"CAPABILITY answered {typ}"
 
 
 class IMAPConnectionError(Exception):
