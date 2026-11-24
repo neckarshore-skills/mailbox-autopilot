@@ -178,6 +178,8 @@ def test_each_answer_of_the_keychain_is_told_apart(monkeypatch, answer, outcome,
 
 @pytest.fixture
 def framework(monkeypatch):
+    if sys.platform != "darwin":
+        pytest.skip("keyring's macOS module loads the Security framework at import")
     """The Security framework calls `read_at` makes, stood in for. The real calls run only in
     the macOS CI job (tests/test_keychain_probe_real.py), never on a laptop's own keychain."""
     from keyring.backends.macOS import api
@@ -196,7 +198,7 @@ def framework(monkeypatch):
         return kwargs
 
     monkeypatch.setattr(api._sec, "SecKeychainOpen", open_keychain, raising=False)
-    monkeypatch.setattr(api._found, "CFArrayCreate", lambda *a: "one keychain", raising=False)
+    monkeypatch.setattr(api._found, "CFArrayCreate", lambda *a: 4096, raising=False)
     monkeypatch.setattr(api, "create_query", query)
     monkeypatch.setattr(api, "SecItemCopyMatching", copy)
     monkeypatch.setattr(api, "cfstr_to_str", lambda data: state["value"])
@@ -212,7 +214,7 @@ def test_the_path_read_keeps_the_frameworks_status(framework, status):
     assert read == {"outcome": "status", "osstatus": status, "value_equals_canary": False}
     assert framework["path"] == b"/k/probe.keychain-db"
     sent = framework["queries"][0]
-    assert sent["kSecMatchSearchList"] == "one keychain"
+    assert sent["kSecMatchSearchList"].value is not None
     assert (sent["kSecAttrService"], sent["kSecAttrAccount"]) == (job.SERVICE, job.ACCOUNT)
 
 

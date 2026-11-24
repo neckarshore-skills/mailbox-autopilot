@@ -59,6 +59,7 @@ def _read(path: str, service: str = job.SERVICE) -> dict:
         return {"outcome": "timeout", "osstatus": None, "value_equals_canary": False}
     assert job.CANARY not in r.stdout + r.stderr, "the value reached the output"
     if r.returncode:
+        print("READ CRASHED:", r.stderr[-800:])  # the canary was checked absent above
         return {"outcome": "crashed", "osstatus": r.returncode, "value_equals_canary": False}
     return json.loads(r.stdout)
 

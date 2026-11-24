@@ -208,7 +208,9 @@ def read_at(path: str, service: str) -> dict:
     if status:
         return {"outcome": "status", "osstatus": status, "value_equals_canary": False}
     callbacks = ctypes.addressof(c_void_p.in_dll(api._found, "kCFTypeArrayCallBacks"))
-    keychains = array(None, (c_void_p * 1)(keychain), 1, callbacks)
+    # As c_void_p, not the int ctypes returns: keyring's create_cf turns an int into a
+    # CFNumber (and overflows on an address); an object passes through unchanged.
+    keychains = c_void_p(array(None, (c_void_p * 1)(keychain), 1, callbacks))
     query = api.create_query(
         kSecClass=api.k_("kSecClassGenericPassword"),
         kSecMatchLimit=api.k_("kSecMatchLimitOne"),
