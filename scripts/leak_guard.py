@@ -2,6 +2,9 @@
 
 Three modes:
 - `--diff FILE` scans only the lines a pull request ADDS;
+- `--commits RANGE` scans every commit in RANGE on its own, against its first parent, so
+  an address added in one commit and removed in the next is caught (the pull-request
+  check; the pre-push hook does the same per push);
 - `--tree` scans every file git tracks, so content older than the pull request is seen too
   (#74; CI runs it on every pull request and every push to main);
 - file mode scans the files named on the command line.
@@ -447,6 +450,53 @@ def _tracked_files() -> list[str]:
     return [f for f in out.split("\0") if f]
 
 
+def _commit_diffs(rng: str) -> list[tuple[str, str]]:
+    """(commit line, its diff) for every commit in `rng`, each against its first parent,
+    as the pre-push hook does: an address added in one commit and removed in the next is in
+    the published history although the net diff is clean (#106, planning #4188)."""
+    commits = subprocess.run(
+        ["git", "rev-list", "--reverse", rng], check=True, capture_output=True, text=True
+    ).stdout.split()
+    out = []
+    for c in commits:
+        diff = subprocess.run(
+            [
+                "git",
+                "diff-tree",
+                "--no-commit-id",
+                "-p",
+                "-U0",
+                "--no-color",
+                "--text",
+                "--root",
+                "-m",
+                "--first-parent",
+                "--diff-filter=ACMRT",
+                c,
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        head = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s", c], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        out.append((head, diff))
+    return out
+
+
+def _scan_diff_bytes(raw: bytes, private, allow):
+    """One diff's hits, the way `--diff` reads it. Raises LeakGuardError on a diff it
+    cannot parse; returns (hits, blocked binary paths, added-line count)."""
+    diff_text = raw.decode("utf-8", errors="replace")
+    entries = added_lines(diff_text)
+    extra = latin1_entries(entries, added_lines(raw.decode("utf-8", LATIN1_FALLBACK)))
+    blocked = [p for p in binary_hit_paths(diff_text) if not path_allowed(p, allow)]
+    hits = local_list_hits(diff_new_paths(diff_text)) + _dedupe(
+        scan_lines(entries + extra, private, allow)
+    )
+    return hits, blocked, len(entries)
+
+
 def main(argv: list[str]) -> int:
     raw = os.environ.get("LEAK_GUARD_PRIVATE_LIST", "")
     local = Path(LOCAL_DENY_LIST)
@@ -485,12 +535,40 @@ def main(argv: list[str]) -> int:
             scan_lines(entries + extra, private, allow)
         )
         scope = f"{len(entries)} added line(s)"
+    elif argv[:1] == ["--commits"]:
+        if len(argv) != 2:
+            print("leak-guard: --commits needs one range, for example origin/main..HEAD")
+            return 2
+        try:
+            diffs = _commit_diffs(argv[1])
+        except subprocess.CalledProcessError as exc:
+            print(f"leak-guard: cannot read the range {argv[1]!r}: {exc}")
+            return 2
+        hits, red = [], False
+        for head, raw in diffs:
+            try:
+                found, blocked, _ = _scan_diff_bytes(raw, private, allow)
+            except LeakGuardError as exc:
+                print(f"leak-guard: {head}: {exc}")
+                return 1
+            for p in blocked:
+                print(f"leak-guard: {head}: undiffed binary change blocked (not allowlisted): {p}")
+                red = True
+            if found:
+                print(f"leak-guard: commit {head}")
+                report(found)
+                hits += found
+        print(f"leak-guard: {len(diffs)} commit(s) scanned, {len(hits)} hit(s)")
+        return 1 if hits or red else 0
     elif argv == ["--tree"]:
         files = _tracked_files()
         hits = local_list_hits(files) + scan_files(files, private, allow, not_read)
         scope = f"{len(files)} file(s)"
     elif any(a.startswith("--") for a in argv):
-        print(f"leak-guard: unknown option {argv[0]!r}; use --diff FILE, --tree or file paths")
+        print(
+            f"leak-guard: unknown option {argv[0]!r}; "
+            "use --diff FILE, --commits RANGE, --tree or file paths"
+        )
         return 2
     else:
         hits = scan_files(argv, private, allow, not_read)
