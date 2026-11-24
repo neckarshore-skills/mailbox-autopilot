@@ -21,13 +21,17 @@ check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
 
+KC = "/Users/mbxprobe/Library/Keychains/probe.keychain-db"
+SYSTEM_ONLY = ["/Library/Keychains/System.keychain", "/Library/Keychains/System.keychain"]
+
+
 def _read(arm, outcome="none", canary=False, mode="drop", console="german", status=None):
     return {
         "arm": arm,
         "mode": mode,
         "action": "read",
-        "facts": {"uid": 502, "console_user": console},
-        "search": {"domain": "user", "on_list": True},
+        "facts": {"uid": 502, "console_user": console, "home_env": "/Users/mbxprobe"},
+        "search": {"domain": "user", "target": KC, "search_list": [KC], "on_list": True},
         "read": {"outcome": outcome, "osstatus": status, "value_equals_canary": canary},
     }
 
@@ -119,6 +123,74 @@ def test_arm_2_outcome_is_reported_not_judged():
     assert verdicts["arm2/drop"] == "MATCHES"
     lines = [t for _, n, t in check.judge(_sitting()) if n == "arm2/drop"]
     assert "KeyringLocked" in lines[0]
+
+
+def test_sitting_2_arms_1_to_3_are_not_taken_for_reads():
+    """Sitting 2, 2026-11-24: the domain's list held the keychain, the effective list did
+    not, and check.py called arm 2 MATCHES because `none` fits "no canary"."""
+    off = _read("arm2")
+    off["search"] = {
+        "domain": "user",
+        "target": KC,
+        "domain_list": [KC],
+        "search_list": SYSTEM_ONLY,
+        "on_list": True,
+    }
+    assert _verdicts(_sitting(**{"arm2/drop": off}))["arm2/drop"] == "DEVIATES"
+
+
+def _by_path(arm, status=-25300, canary=False, mode="drop"):
+    """A job with no list (no domain reached in arm 2): the path route only."""
+    return {
+        "arm": arm,
+        "mode": mode,
+        "action": "unlock-read",
+        "facts": {"uid": 502, "console_user": "german", "home_env": "/Users/mbxprobe"},
+        "list_read": "not reached",
+        "read_path": {
+            "outcome": "value" if canary else "status",
+            "osstatus": 0 if canary else status,
+            "value_equals_canary": canary,
+        },
+    }
+
+
+def test_a_path_only_sitting_is_judged_on_the_frameworks_status():
+    verdicts = _verdicts(
+        _sitting(
+            **{
+                "arm2/drop": _by_path("arm2", -25308),
+                "arm3a/drop": _by_path("arm3a", -25308),
+                "arm3b/drop": _by_path("arm3b", canary=True),
+                "arm3c/drop": _by_path("arm3c", canary=True),
+                "arm7/drop": _by_path("arm7", -25300),
+                "arm4b/drop": _by_path("arm4b", canary=True),
+            }
+        )
+    )
+    assert "DEVIATES" not in verdicts.values()
+
+
+def test_arm_7_by_path_must_say_not_found_not_just_no_canary():
+    """The red control: a locked or denied answer cannot tell missing from locked."""
+    verdicts = _verdicts(_sitting(**{"arm7/drop": _by_path("arm7", -25308)}))
+    assert verdicts["arm7/drop"] == "DEVIATES"
+
+
+def test_arm_3_names_the_route_that_read():
+    lines = {
+        n: t
+        for _, n, t in check.judge(
+            _sitting(**{"arm3b/drop": _by_path("arm3b", canary=True), "arm3c/drop": _read("arm3c")})
+        )
+    }
+    assert "arm3b/drop (path)" in lines["arm3"]
+
+
+def test_a_list_route_that_did_not_reach_deviates_even_with_a_path_read():
+    off = _by_path("arm6a", -25308)
+    off["search"] = {"domain": "user", "target": KC, "search_list": SYSTEM_ONLY, "on_list": False}
+    assert _verdicts(_sitting(**{"arm6a/drop": off}))["arm6a/drop"] == "DEVIATES"
 
 
 def test_a_failed_job_deviates():

@@ -39,6 +39,35 @@ jobs:
       - name: Run tests (Docker IMAP starts as part of fixture)
         run: uv run pytest -v
 
+  # #76 L11: the keychain probe's path route against the real Security framework, on a
+  # throwaway macOS VM (standard runner: free on a public repo). It proves the ctypes query
+  # and the partition halves in a user session, not a launchd system-session job: that is
+  # the target Mac's to answer. Not a required check.
+  probe-keychain-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.5"
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Probe tests, real keychain included
+        env:
+          PROBE_REAL_KEYCHAIN: "1"
+        run: >-
+          uv run pytest -v -s tests/test_keychain_probe_real.py tests/test_keychain_probe.py
+          tests/test_keychain_probe_check.py
+
   # Estate stats.json producer (test-scope facet, backlog #394 / Phase-3 breadth rollout).
   # Publishes a contract-conformant stats.json to the UNPROTECTED `stats-data` branch on every
   # push:main, AFTER the `test` gate. Runs even when `test` fails (if: always) so a non-green run

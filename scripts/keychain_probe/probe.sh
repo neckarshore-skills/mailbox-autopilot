@@ -20,8 +20,8 @@ SECRET="$DIR/unlock.secret"
 LOGIN_SECRET="$DIR/login.secret"
 REPORT="$DIR/report.jsonl"
 KEPT_REPORT="/Users/Shared/keychain-probe-report.jsonl"
-PARTITION="$DIR/partition" # which half of arm 3 read; later arms use only that one
-DOMAIN="$DIR/domain"       # the search list domain that held in arm 2; every read sets it
+PARTITION="$DIR/partition" # route and half of arm 3 that read; later arms use only that one
+DOMAIN="$DIR/domain"       # the domain that reached the effective list in arm 2, or none
 PY="$DIR/venv311/bin/python"
 PY2="$DIR/venv312/bin/python"
 
@@ -88,8 +88,17 @@ run_job() { # arm mode action [job arguments]
   run_job_with "$PY" "$@"
 }
 
-read_job_with() { # interpreter arm mode action [job arguments]: a read the list has to reach
-  run_job_with "$@"
+read_job_with() { # interpreter arm mode action [job arguments]
+  # The list route is gated: once arm 2 proved a domain, every reading job sets it and must
+  # reach the keychain through the effective list, or the run stops. The path route needs
+  # no list, so with domain `none` the jobs read by path only.
+  local domain
+  domain=$(proven_domain)
+  if [ "$domain" = none ]; then
+    run_job_with "$@"
+    return
+  fi
+  run_job_with "$@" --search-domain "$domain"
   if ! "$PY" "$DIR/show.py" --listed "$DIR/out/$2-$3.out"; then
     die "$2: the keychain was not on the job's search list. Stop here, and tell Obi"
   fi
@@ -102,15 +111,23 @@ read_job() { # arm mode action [job arguments]
 proven_domain() { # sitting 1: a list set by an earlier job does not reach the next one
   local proven=""
   if [ -f "$DOMAIN" ]; then proven=$(cat "$DOMAIN"); fi
-  [ -n "$proven" ] || die "no domain put the keychain on the job's search list. Stop here, and tell Obi"
+  [ -n "$proven" ] || die "arm 2 has not run, so no domain is known. Stop here, and tell Obi"
   printf '%s\n' "$proven"
 }
 
-proven_partition() { # stop rule: arms 4, 6 and 7 mean something only with what arm 3 proved
+proven_winner() { # stop rule: arms 4, 6 and 7 mean something only with what arm 3 proved
   local proven=""
   if [ -f "$PARTITION" ]; then proven=$(cat "$PARTITION"); fi
-  [ -n "$proven" ] || die "no half of arm 3 read the canary. Stop here, and tell Obi"
+  [ -n "$proven" ] || die "no half of arm 3 read the canary on either route. Stop here, and tell Obi"
   printf '%s\n' "$proven"
+}
+
+proven_partition() { # the half, without the route: `path cdhash` -> `cdhash`
+  local proven
+  # `|| exit`: errexit does not reach into a command substitution, so a `die` in
+  # proven_winner would end only its subshell and this function would print an empty half.
+  proven=$(proven_winner) || exit 2
+  printf '%s\n' "${proven#* }"
 }
 
 home_ready() {
@@ -166,8 +183,10 @@ cmd_arm1() {
 cmd_arm2() {
   home_ready
   run_job arm2-prepare drop prepare
-  local d domain
+  local d
   rm -f "$DOMAIN"
+  # Only these two: the `common` and `system` domains are the whole machine's, the owner's
+  # own sessions included, and this Mac runs the backup.
   for d in user dynamic; do
     run_job "arm2-search-$d" drop search --search-domain "$d"
     if "$PY" "$DIR/show.py" --listed "$DIR/out/arm2-search-$d-drop.out"; then
@@ -175,45 +194,45 @@ cmd_arm2() {
       break
     fi
   done
-  domain=$(proven_domain)
-  say "search list domain that held: $domain"
-  read_job arm2 drop read --search-domain "$domain"
-  read_job arm2 username read --search-domain "$domain"
+  if [ ! -s "$DOMAIN" ]; then
+    printf '%s\n' none >"$DOMAIN"
+    say "no domain reaches the job's effective search list: the list route is out, the path route reads alone"
+  fi
+  say "search list domain that held: $(proven_domain)"
+  read_job arm2 drop read
+  read_job arm2 username read
 }
 
 cmd_arm3() {
   home_ready
-  local domain
-  domain=$(proven_domain)
+  proven_domain >/dev/null
   run_job arm3a-prepare drop prepare
-  read_job arm3a drop unlock-read --search-domain "$domain"
+  read_job arm3a drop unlock-read
   run_job arm3b-prepare drop prepare --partition unsigned
-  read_job arm3b drop unlock-read --search-domain "$domain"
+  read_job arm3b drop unlock-read
   run_job arm3c-prepare drop prepare --partition cdhash
-  read_job arm3c drop unlock-read --search-domain "$domain"
+  read_job arm3c drop unlock-read
   "$PY" "$DIR/show.py" --winner "$REPORT" >"$PARTITION"
-  say "partition that read: $(cat "$PARTITION")"
-  proven_partition >/dev/null
+  say "route and partition that read: $(cat "$PARTITION")"
+  proven_winner >/dev/null
 }
 
 cmd_arm6() {
   home_ready
-  local partition domain
-  domain=$(proven_domain)
+  local partition
   partition=$(proven_partition)
   run_job arm6a-prepare drop prepare --no-trust --partition "$partition"
-  read_job arm6a drop unlock-read --search-domain "$domain"
+  read_job arm6a drop unlock-read
   run_job arm6b-prepare drop prepare --partition "$partition"
-  read_job_with "$PY2" arm6b drop unlock-read --search-domain "$domain"
+  read_job_with "$PY2" arm6b drop unlock-read
 }
 
 cmd_arm7() {
   home_ready
-  local partition domain
-  domain=$(proven_domain)
+  local partition
   partition=$(proven_partition)
   run_job arm7-prepare drop prepare --partition "$partition"
-  read_job arm7 drop unlock-read --search-domain "$domain" --service mailbox-cleanup-probe-wrong
+  read_job arm7 drop unlock-read --service mailbox-cleanup-probe-wrong
 }
 
 cmd_arm4_install() { # the plist stays in place, so launchd starts the job at boot
@@ -225,8 +244,13 @@ cmd_arm4_install() { # the plist stays in place, so launchd starts the job at bo
   local out="$DIR/out/arm4-boot.out" err="$DIR/out/arm4-boot.err"
   : >"$out"
   : >"$err"
-  emit_plist "$PY" "$out" "$err" drop --arm arm4 --mode drop --action unlock-read \
-    --user "$USER_NAME" --group "$GROUP_NAME" --secret-file "$SECRET" --search-domain "$domain"
+  if [ "$domain" = none ]; then
+    emit_plist "$PY" "$out" "$err" drop --arm arm4 --mode drop --action unlock-read \
+      --user "$USER_NAME" --group "$GROUP_NAME" --secret-file "$SECRET"
+  else
+    emit_plist "$PY" "$out" "$err" drop --arm arm4 --mode drop --action unlock-read \
+      --user "$USER_NAME" --group "$GROUP_NAME" --secret-file "$SECRET" --search-domain "$domain"
+  fi
   chown -h "$USER_NAME" "$out" "$err"
   say "installed for the next boot. Reboot, then: arm4-read, then arm4b"
 }
@@ -235,17 +259,17 @@ cmd_arm4_read() {
   launchctl bootout "system/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
   record arm4 drop "$DIR/out/arm4-boot.out" "$DIR/out/arm4-boot.err"
-  if ! "$PY" "$DIR/show.py" --listed "$DIR/out/arm4-boot.out"; then
+  local domain
+  domain=$(proven_domain)
+  if [ "$domain" != none ] && ! "$PY" "$DIR/show.py" --listed "$DIR/out/arm4-boot.out"; then
     die "arm4: the keychain was not on the job's search list. Stop here, and tell Obi"
   fi
 }
 
 cmd_arm4b() { # the state of the 14 runs a day: the owner logged in, the bot not
   [ "$(stat -f %Su /dev/console)" != "root" ] || die "nobody is at the console yet; wait and retry"
-  local domain
-  domain=$(proven_domain)
   proven_partition >/dev/null
-  read_job arm4b drop unlock-read --search-domain "$domain"
+  read_job arm4b drop unlock-read
 }
 
 cmd_arm5_reset() {
@@ -261,10 +285,8 @@ cmd_arm5_reset() {
 }
 
 cmd_arm5_read() { # the login keychain the GUI login made, not the probe's
-  local domain
-  domain=$(proven_domain)
-  read_job arm5 drop read --search-domain "$domain" --keychain login
-  read_job arm5 username read --search-domain "$domain" --keychain login
+  read_job arm5 drop read --keychain login
+  read_job arm5 username read --keychain login
 }
 
 cmd_report() {
