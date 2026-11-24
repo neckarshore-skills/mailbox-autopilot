@@ -12,6 +12,10 @@ JSON. 3: nothing deviates but an arm is open, so the report is not the whole sit
 
 import json
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from show import reached  # noqa: E402  one judgement of "the read could reach it", not two
 
 CANARY, NO_CANARY, LOCKED, MISSING = "canary", "no canary", "locked", "missing"
 
@@ -42,8 +46,8 @@ def _got(r: dict) -> tuple[str | None, str]:
     if "failed" in r:
         return None, f"failed in the job ({r['failed']})"
     search = r.get("search")
-    if search is not None and not search.get("on_list"):
-        return None, f"not on the search list ({search.get('domain')}), no read"
+    if search is not None and not reached(r):
+        return None, f"not on the effective search list ({search.get('domain')}), no read"
     read = r.get("read")
     if read is None:
         return None, "no read in the record"

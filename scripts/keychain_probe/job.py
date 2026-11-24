@@ -126,17 +126,25 @@ def use_search_list(domain: str, path: str) -> dict:
     set by an earlier job is on disk, and a later job of a user who never logged in sees only
     the System keychain. keyring reads through the search list only (it ignores a keychain
     path, see its `warn_keychain`), so a read the list does not reach says `none` for a
-    reason that has nothing to do with access."""
+    reason that has nothing to do with access.
+
+    Measured in sitting 2 (2026-11-24): the domain's own list held the keychain while the
+    effective list, the one `list-keychains` without `-d` prints and a read goes through,
+    held only the System keychain. So `on_list` is judged on the effective list, and the
+    domain's list is kept beside it as a fact."""
     put = security_script([f"list-keychains -d {domain} -s {path}"])
     _, in_domain = _run(SECURITY, "list-keychains", "-d", domain)
     _, plain = _run(SECURITY, "list-keychains")
-    seen = _keychains(in_domain)
+    seen, effective = _keychains(in_domain), _keychains(plain)
+    home = os.environ.get("HOME", "")
     return {
         "domain": domain,
+        "target": path,
         "set": put,
         "domain_list": seen,
-        "search_list": _keychains(plain),
-        "on_list": on_list(seen, path, home=os.environ.get("HOME", "")),
+        "domain_on_list": on_list(seen, path, home=home),
+        "search_list": effective,
+        "on_list": on_list(effective, path, home=home),
     }
 
 

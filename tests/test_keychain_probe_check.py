@@ -21,13 +21,17 @@ check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
 
+KC = "/Users/mbxprobe/Library/Keychains/probe.keychain-db"
+SYSTEM_ONLY = ["/Library/Keychains/System.keychain", "/Library/Keychains/System.keychain"]
+
+
 def _read(arm, outcome="none", canary=False, mode="drop", console="german", status=None):
     return {
         "arm": arm,
         "mode": mode,
         "action": "read",
-        "facts": {"uid": 502, "console_user": console},
-        "search": {"domain": "user", "on_list": True},
+        "facts": {"uid": 502, "console_user": console, "home_env": "/Users/mbxprobe"},
+        "search": {"domain": "user", "target": KC, "search_list": [KC], "on_list": True},
         "read": {"outcome": outcome, "osstatus": status, "value_equals_canary": canary},
     }
 
@@ -119,6 +123,20 @@ def test_arm_2_outcome_is_reported_not_judged():
     assert verdicts["arm2/drop"] == "MATCHES"
     lines = [t for _, n, t in check.judge(_sitting()) if n == "arm2/drop"]
     assert "KeyringLocked" in lines[0]
+
+
+def test_sitting_2_arms_1_to_3_are_not_taken_for_reads():
+    """Sitting 2, 2026-11-24: the domain's list held the keychain, the effective list did
+    not, and check.py called arm 2 MATCHES because `none` fits "no canary"."""
+    off = _read("arm2")
+    off["search"] = {
+        "domain": "user",
+        "target": KC,
+        "domain_list": [KC],
+        "search_list": SYSTEM_ONLY,
+        "on_list": True,
+    }
+    assert _verdicts(_sitting(**{"arm2/drop": off}))["arm2/drop"] == "DEVIATES"
 
 
 def test_a_failed_job_deviates():

@@ -7,6 +7,27 @@ import sys
 HALVES = (("arm3a", "none"), ("arm3b", "unsigned"), ("arm3c", "cdhash"))
 
 
+def _same(entry: str, target: str, home: str) -> bool:
+    if entry.startswith("~/") and home:
+        entry = home.rstrip("/") + entry[1:]
+    return entry.removesuffix("-db") == target.removesuffix("-db")
+
+
+def reached(r: dict) -> bool:
+    """The job's keychain is on the list a read goes through. Judged here from the lists the
+    record holds, not from the job's own `on_list`, because the job judged it wrongly once:
+    in sitting 2 the domain's list held the keychain and the effective list did not."""
+    search = r.get("search") or {}
+    target = search.get("target") or ""
+    home = (r.get("facts") or {}).get("home_env", "")
+    effective = search.get("search_list") or []
+    return (
+        search.get("on_list") is True
+        and bool(target)
+        and any(_same(e, target, home) for e in effective)
+    )
+
+
 def line(r: dict) -> str:
     head = f"{r.get('arm')}/{r.get('mode')}"
     if "failed" in r:
@@ -14,8 +35,9 @@ def line(r: dict) -> str:
     facts = r.get("facts", {})
     who = f"uid {facts.get('uid')}, console {facts.get('console_user')}"
     search = r.get("search")
-    if search is not None and not search.get("on_list"):
-        return f"{head}: NOT ON THE SEARCH LIST ({search.get('domain')}), no read ({who})"
+    if search is not None and not reached(r):
+        held = " (its own domain list has it)" if search.get("domain_on_list") else ""
+        return f"{head}: NOT ON THE SEARCH LIST ({search.get('domain')}){held}, no read ({who})"
     if r.get("action") == "search":
         return f"{head}: on the search list ({search.get('domain')}) ({who})"
     read = r.get("read")
@@ -48,7 +70,7 @@ def listed(path: str) -> bool:
     """Every job in this file had the keychain on its own search list. A reading job that set
     no list at all fails too: that is how f6df90b read past the keychain in sitting 1."""
     found = records(path)
-    return bool(found) and all(r.get("search", {}).get("on_list") is True for r in found)
+    return bool(found) and all(reached(r) for r in found)
 
 
 def winner(path: str) -> str:

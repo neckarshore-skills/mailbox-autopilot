@@ -343,19 +343,32 @@ def test_arm_5_reads_the_keychain_the_gui_login_made(monkeypatch):
     assert job._keychain_path() == "/Users/u/Library/Keychains/probe.keychain-db"
 
 
+SYSTEM_ONLY = ["/Library/Keychains/System.keychain", "/Library/Keychains/System.keychain"]
+
+
 @pytest.fixture
 def lists(monkeypatch, tmp_path):
-    """`security` whose search list holds what this job set, and nothing a job before it set."""
-    state = {"calls": [], "held": [], "works": {"user"}}
+    """`security` whose search list holds what this job set, and nothing a job before it set.
+
+    `works` are the domains whose list takes the keychain. `reaches` are the domains whose
+    list also reaches the effective one, the list `list-keychains` without `-d` prints and a
+    read goes through. Sitting 2 measured a domain in the first set and not in the second:
+    the stand-in sitting 1's fix was tested against could not show that, so it is a switch."""
+    state = {"calls": [], "domain": {}, "effective": [], "works": {"user"}, "reaches": {"user"}}
 
     def run(argv, input=None, **kw):
         state["calls"].append((argv, input))
         for line in (input or "").splitlines():
             m = re.match(r"list-keychains -d (\w+) -s (\S+)", line)
             if m and m.group(1) in state["works"]:
-                state["held"] = [m.group(2)]
+                state["domain"][m.group(1)] = [m.group(2)]
+                if m.group(1) in state["reaches"]:
+                    state["effective"] = [m.group(2)]
         if list(argv[1:2]) == ["list-keychains"]:
-            shown = state["held"] or ["/Library/Keychains/System.keychain"]
+            if "-d" in argv:
+                shown = state["domain"].get(argv[argv.index("-d") + 1], [])
+            else:
+                shown = state["effective"] or SYSTEM_ONLY
             return SimpleNamespace(returncode=0, stdout="".join(f'    "{x}"\n' for x in shown))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -393,6 +406,22 @@ def test_a_keychain_that_is_not_on_the_list_is_not_read(lists, monkeypatch, caps
     assert "read" not in record and "unlock" not in record
 
 
+def test_sitting_2_a_domain_list_that_holds_is_not_the_list_a_read_goes_through(
+    lists, monkeypatch, capsys
+):
+    """Sitting 2, 2026-11-24, every reading job: `list-keychains -d user` held the probe
+    keychain and plain `list-keychains` held the System keychain twice. The guard looked at
+    the first, said `on_list`, and three halves of arm 3 read nothing they could have read."""
+    lists["reaches"] = set()
+    monkeypatch.setattr(job, "drop_to", lambda user: None)
+    monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("read past the list"))
+    job.main(_job("unlock-read") + ["--search-domain", "user"])
+    search = json.loads(capsys.readouterr().out)["search"]
+    assert search["domain_on_list"] is True
+    assert search["search_list"] == SYSTEM_ONLY
+    assert search["on_list"] is False
+
+
 def test_a_search_job_only_sets_and_looks(lists, monkeypatch, capsys):
     monkeypatch.setattr(job, "drop_to", lambda user: None)
     monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("a search job read"))
@@ -409,8 +438,39 @@ def test_prepare_records_the_list_it_leaves_behind(lists, monkeypatch, capsys):
     assert record["after_prepare"]["search_list"][0].endswith("probe.keychain-db")
 
 
-def _searched(on_list):
-    return {"arm": "armX", "search": {"domain": "user", "on_list": on_list}}
+PROBE_KC = "/Users/mbxprobe/Library/Keychains/probe.keychain-db"
+
+
+def _searched(on_list, effective=None):
+    if effective is None:
+        effective = [PROBE_KC] if on_list else SYSTEM_ONLY
+    return {
+        "arm": "armX",
+        "facts": {"home_env": "/Users/mbxprobe"},
+        "search": {
+            "domain": "user",
+            "target": PROBE_KC,
+            "domain_list": [PROBE_KC],
+            "search_list": effective,
+            "on_list": on_list,
+        },
+    }
+
+
+SITTING_2_ARM_3A = {  # trimmed from the report of 2026-11-24, 17:52:58Z; uids and paths only
+    "arm": "arm3a",
+    "mode": "drop",
+    "action": "unlock-read",
+    "facts": {"uid": 502, "console_user": "german", "home_env": "/Users/mbxprobe"},
+    "search": {
+        "domain": "user",
+        "domain_list": [PROBE_KC],
+        "on_list": True,
+        "search_list": SYSTEM_ONLY,
+    },
+    "unlock": {"errors": [], "rc": 0},
+    "read": {"osstatus": None, "outcome": "none", "value_equals_canary": False},
+}
 
 
 @pytest.mark.parametrize(
@@ -420,11 +480,18 @@ def _searched(on_list):
         ((_searched(True), _searched(False)), False),
         (({"arm": "armX", "read": {}},), False),  # a reading job that set no list at all
         ((), False),
+        ((_searched(True, effective=SYSTEM_ONLY),), False),  # the job says yes, its list no
+        ((SITTING_2_ARM_3A,), False),
     ],
-    ids=["listed", "one-not", "no-search", "empty"],
+    ids=["listed", "one-not", "no-search", "empty", "job-wrong", "sitting-2"],
 )
 def test_the_runner_learns_whether_the_job_had_the_keychain_on_its_list(tmp_path, lines, ok):
     assert show.listed(_report(tmp_path, *lines)) is ok
+
+
+def test_sitting_2_would_have_stopped_at_arm_2_on_the_line_the_owner_reads():
+    line = show.line(SITTING_2_ARM_3A)
+    assert "NOT ON THE SEARCH LIST" in line and "no canary" not in line
 
 
 def test_a_refused_read_says_so_on_the_line_the_owner_reads():
@@ -463,8 +530,15 @@ if action == "prepare":
 # Sitting 1: a list set in an earlier job is gone; only a domain set in this job can hold.
 domain = get("--search-domain") if "--search-domain" in args else ""
 listed = bool(domain) and domain in os.environ.get("WALK_DOMAINS", "user").split(",")
+# Sitting 2: a domain may take the keychain and still not reach the effective list.
+wrong = domain in os.environ.get("WALK_DOMAIN_ONLY", "").split(",")
+kc = "/Users/mbxprobe/Library/Keychains/probe.keychain-db"
+r["facts"]["home_env"] = "/Users/mbxprobe"
 if domain:
-    r["search"] = {"domain": domain, "on_list": listed}
+    effective = [kc] if listed and not wrong else ["/Library/Keychains/System.keychain"]
+    r["search"] = {"domain": domain, "target": kc, "search_list": effective,
+                   "on_list": listed or wrong}
+    listed = listed and not wrong
 if action in ("read", "unlock-read") and (listed or not domain):
     hit = listed and arm in os.environ.get("WALK_READS", "").split(",")
     outcome = "value" if hit else "none"
@@ -588,7 +662,13 @@ def test_the_whole_sitting_walks_through_and_later_arms_use_the_half_that_read(w
             {
                 "arm": "arm4",
                 "mode": "drop",
-                "search": {"domain": "user", "on_list": True},
+                "facts": {"home_env": "/Users/mbxprobe"},
+                "search": {
+                    "domain": "user",
+                    "target": PROBE_KC,
+                    "search_list": [PROBE_KC],
+                    "on_list": True,
+                },
                 "read": {"value_equals_canary": True},
             }
         )
@@ -672,6 +752,13 @@ def test_no_domain_that_holds_stops_every_reading_arm(walk):
     for arm in ("arm3", "arm6", "arm7", "arm4-install", "arm4b", "arm5-read"):
         r = walk(arm)
         assert r.returncode == 2 and "no domain put the keychain on" in r.stderr, arm
+
+
+def test_a_job_that_calls_a_domain_list_reached_does_not_get_past_the_runner(walk):
+    """Sitting 2 from the runner's side: the job said `on_list` for the domain's own list.
+    The runner judges the effective list in the record itself and stops."""
+    r = walk("setup", "arm2", WALK_DOMAIN_ONLY="user,dynamic")
+    assert r.returncode == 2 and "no domain put the keychain on" in r.stderr
 
 
 def test_a_reading_arm_without_the_list_stops_the_run(walk):
