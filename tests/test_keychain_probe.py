@@ -198,6 +198,12 @@ def framework(monkeypatch):
         return kwargs
 
     monkeypatch.setattr(api._sec, "SecKeychainOpen", open_keychain, raising=False)
+    monkeypatch.setattr(
+        api._sec,
+        "SecKeychainSetUserInteractionAllowed",
+        lambda allowed: state.__setitem__("ui", allowed) or 0,
+        raising=False,
+    )
     monkeypatch.setattr(api._found, "CFArrayCreate", lambda *a: 4096, raising=False)
     monkeypatch.setattr(api, "create_query", query)
     monkeypatch.setattr(api, "SecItemCopyMatching", copy)
@@ -216,6 +222,20 @@ def test_the_path_read_keeps_the_frameworks_status(framework, status):
     sent = framework["queries"][0]
     assert sent["kSecMatchSearchList"].value is not None
     assert (sent["kSecAttrService"], sent["kSecAttrAccount"]) == (job.SERVICE, job.ACCOUNT)
+
+
+def test_the_path_read_turns_prompts_off_before_it_reads(framework):
+    """A locked keychain otherwise waits for a dialog (macOS CI job, first green run)."""
+    job.read_at("/k/probe.keychain-db", job.SERVICE)
+    assert framework["ui"] == 0
+
+
+def test_the_list_read_runs_before_prompts_are_turned_off(monkeypatch):
+    order = []
+    monkeypatch.setattr(job, "read_item", lambda service: order.append("list") or {})
+    monkeypatch.setattr(job, "read_at", lambda path, service: order.append("path") or {})
+    job.both_reads(job.SERVICE, "/k/probe.keychain-db", reached=True)
+    assert order == ["list", "path"]
 
 
 def test_the_path_read_names_a_keychain_it_cannot_open(framework):

@@ -197,6 +197,14 @@ def read_at(path: str, service: str) -> dict:
 
     from keyring.backends.macOS import api
 
+    # No prompt: measured on the macOS CI job, a path read of a locked keychain in a user
+    # session waits for a dialog nobody answers. With interaction off it answers with a
+    # status (errSecInteractionNotAllowed) instead, which is what a job without a session
+    # needs and what the record must show. Process-wide, so both_reads runs it last.
+    no_ui = api._sec.SecKeychainSetUserInteractionAllowed
+    no_ui.restype = api.OS_status
+    no_ui.argtypes = (ctypes.c_ubyte,)
+    no_ui(0)
     open_keychain = api._sec.SecKeychainOpen
     open_keychain.restype = api.OS_status
     open_keychain.argtypes = (ctypes.c_char_p, ctypes.POINTER(c_void_p))
@@ -263,11 +271,12 @@ def both_reads(service: str, path: str, *, reached: bool) -> dict:
     """The list route only where this job's effective list reaches the keychain, the path
     route always. A list read that could not reach it is named, never run: its `none`
     would look like an answer."""
-    reads: dict = {"read_path": read_at(path, service)}
+    reads: dict = {}
     if reached:
         reads["read"] = read_item(service)
     else:
         reads["list_read"] = "not reached"
+    reads["read_path"] = read_at(path, service)  # last: it turns prompts off for the process
     return reads
 
 
