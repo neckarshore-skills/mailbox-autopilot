@@ -100,8 +100,8 @@ install_launcher() { # owner
   say "launcher files, root-owned (L3)"
   install -d -o root -g wheel -m 755 "$BASE" "$BASE/launcher" "$BASE/launcher/empty"
   install -o root -g wheel -m 755 "$SRC/launch.sh" "$BASE/launcher/launch.sh"
-  install -o root -g wheel -m 644 "$SRC/gate.py" "$SRC/retention.py" \
-    "$SRC/settings.json" "$SRC/host.json" "$BASE/launcher/"
+  install -o root -g wheel -m 644 "$SRC/gate.py" "$SRC/digest.py" "$SRC/retention.py" \
+    "$SRC/prompt.txt" "$SRC/settings.json" "$SRC/host.json" "$BASE/launcher/"
   say "run files and digests go to $1 only (L5)"
   install -d -o "$1" -g staff -m 700 "$BASE/runs" "$BASE/digests"
 }

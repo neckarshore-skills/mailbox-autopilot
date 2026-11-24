@@ -9,6 +9,9 @@ Standard library only, and nothing is imported from the mailbox_cleanup package.
 pinned list lives here on purpose (L8): widening the bot takes two keys, the package and
 this root-owned file. tests/test_launcher.py holds the literals against the host.
 
+After the session it builds the owner's digest of the day before (launcher/digest.py,
+loaded by its path): counted from the run files, never from what the model wrote.
+
 Not done here, by design:
 - The credential step (L11) is a seam that refuses, so this launcher cannot start a
   session until the keychain probe has an answer. See credential_step().
@@ -17,6 +20,7 @@ Not done here, by design:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import selectors
@@ -40,7 +44,10 @@ CLAUDE = Path("/usr/local/mailbox-autopilot/claude/claude")
 MCP_CONFIG = BASE / "launcher" / "host.json"
 SETTINGS = BASE / "launcher" / "settings.json"  # the bot's own settings, not managed (PR)
 PROMPT_FILE = BASE / "launcher" / "prompt.txt"
+SINCE_TOKEN = "{since}"  # prompt.txt names the day to search from; the launcher fills it
 RUNS_DIR = BASE / "runs"  # L5: owner-only files, one per run
+DIGESTS_DIR = BASE / "digests"  # L5: one digest a day, owner-only
+DIGEST = Path(__file__).with_name("digest.py")
 WORK_DIR = BASE / "launcher" / "empty"  # 5c: no CLAUDE.md, no .claude/
 BOT_USER = "mailbox-autopilot-bot"
 BOT_GROUP = "mailbox-autopilot-bot"
@@ -58,6 +65,7 @@ EXIT_WALL_CLOCK = 13  # L12
 EXIT_CHILD = 14  # claude ended non-zero
 EXIT_TERMINATED = 15  # SIGTERM, from launchd or root; the session was killed first
 EXIT_VERSION = 16  # L4: the installed claude is not CLAUDE_VERSION
+EXIT_PROMPT = 17  # prompt.txt is absent or blank
 
 
 def build_env() -> dict[str, str]:
@@ -164,6 +172,41 @@ def credential_step(env: dict[str, str]) -> dict[str, str]:
 
 class CredentialUnavailable(Exception):
     pass
+
+
+class PromptUnavailable(Exception):
+    pass
+
+
+def load_prompt(path: Path, day: str) -> str:
+    """The bot's task, with the day to search from filled in by the launcher, never by a
+    mail. The prompt carries no safety (section 7): an absent or blank file is refused
+    only so the run file says why nothing ran, instead of a traceback."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PromptUnavailable(f"{path.name}: {type(exc).__name__}") from None
+    if not text.strip():
+        raise PromptUnavailable(f"{path.name} is blank")
+    return text.replace(SINCE_TOKEN, day)
+
+
+def _digest():
+    """digest.py, loaded from beside this file by path, so no search path can shadow it."""
+    spec = importlib.util.spec_from_file_location("mailbox_autopilot_digest", DIGEST)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # its dataclass looks the module up there
+    spec.loader.exec_module(module)
+    return module
+
+
+def after_session(out, day: str, runs_dir: Path = RUNS_DIR, digests_dir: Path = DIGESTS_DIR):
+    """Rebuild the digest of `day` from every run file. A failure is noted and does not
+    change the run's exit code: the digest is a report, not a gate."""
+    try:
+        note(out, digest=_digest().build(day, runs_dir, digests_dir))
+    except Exception as exc:  # noqa: BLE001 - any failure is one line in the run file
+        note(out, digest_failed=type(exc).__name__)
 
 
 def open_run_file(runs_dir: Path | None = None):
@@ -317,17 +360,24 @@ def main() -> int:
         if (reason := check_claude_version(CLAUDE, build_env())) is not None:
             note(out, refused="version", reason=reason)
             return EXIT_VERSION
+        day = _digest().yesterday()
+        try:
+            prompt = load_prompt(PROMPT_FILE, day)
+        except PromptUnavailable as exc:
+            note(out, refused="prompt", reason=str(exc))
+            return EXIT_PROMPT
         try:
             env = credential_step(build_env())
         except CredentialUnavailable as exc:
             note(out, refused="credential", reason=str(exc))
             return EXIT_CREDENTIAL
-        prompt = PROMPT_FILE.read_text(encoding="utf-8")
         try:
-            return supervise(build_argv(), env, prompt, out)
+            rc = supervise(build_argv(), env, prompt, out)
         except Terminated:
             note(out, refused="terminated")
             return EXIT_TERMINATED
+        after_session(out, day)
+        return rc
 
 
 if __name__ == "__main__":

@@ -313,6 +313,7 @@ def test_the_uv_pin_is_the_ci_pin():
 def _main_without_root(tmp_path, monkeypatch, version_reason=None):
     calls = []
     monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "PROMPT_FILE", LAUNCHER / "prompt.txt")
     monkeypatch.setattr(gate, "kill_leftovers", lambda: calls.append("kill") or 0)
     monkeypatch.setattr(
         gate, "check_claude_version", lambda *a, **k: calls.append("version") or version_reason
@@ -474,3 +475,75 @@ def test_launch_never_follows_a_link_planted_in_the_owners_runs_directory(tmp_pa
     proc = subprocess.run(["bash", str(copy)], capture_output=True, text=True)
     assert proc.returncode == 20
     assert target.read_text() == "untouched\n"
+
+
+# ---- the prompt file and the digest after the session (#76 section 3 (i), L5) ----
+
+
+def test_the_shipped_prompt_names_the_task_and_the_day_token():
+    text = (LAUNCHER / "prompt.txt").read_text()
+    assert gate.SINCE_TOKEN in text and "search" in text
+    assert gate.load_prompt(LAUNCHER / "prompt.txt", "2026-11-23").count("2026-11-23") >= 1
+    assert gate.SINCE_TOKEN not in gate.load_prompt(LAUNCHER / "prompt.txt", "2026-11-23")
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"], ids=["absent", "empty", "blank"])
+def test_a_missing_prompt_is_a_refusal_not_a_traceback(tmp_path, content):
+    path = tmp_path / "prompt.txt"
+    if content is not None:
+        path.write_text(content)
+    with pytest.raises(gate.PromptUnavailable):
+        gate.load_prompt(path, "2026-11-23")
+
+
+def test_after_the_session_the_digest_is_built_and_noted(tmp_path):
+    runs, digests = tmp_path / "runs", tmp_path / "digests"
+    runs.mkdir()
+    digests.mkdir()
+    out_path = tmp_path / "out.jsonl"
+    with out_path.open("w") as out:
+        gate.after_session(out, "2026-11-23", runs, digests)
+    note = json.loads(out_path.read_text())["launcher"]
+    assert note["digest"] == {"day": "2026-11-23", "mails": 0, "complete": False}
+    assert (digests / "digest-2026-11-23.md").exists()
+
+
+def test_a_digest_that_cannot_be_built_is_noted_and_the_launcher_goes_on(tmp_path):
+    out_path = tmp_path / "out.jsonl"
+    with out_path.open("w") as out:
+        gate.after_session(out, "2026-11-23", tmp_path / "runs", tmp_path / "missing")
+    assert json.loads(out_path.read_text())["launcher"] == {"digest_failed": "FileNotFoundError"}
+
+
+def test_gate_loads_digest_by_its_path_not_by_a_search():
+    source = (LAUNCHER / "gate.py").read_text()
+    assert not re.search(r"^\s*(from|import)\s+digest", source, re.M)
+    assert gate._digest().SEARCH == "mcp__mailbox__search"
+
+
+def test_a_missing_prompt_stops_before_the_credential_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "credential_step", lambda env: pytest.fail("credential read"))
+    monkeypatch.setattr(gate, "after_session", lambda *a: pytest.fail("digest built"))
+    monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "PROMPT_FILE", tmp_path / "prompt.txt")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: 0)
+    monkeypatch.setattr(gate, "check_claude_version", lambda *a, **k: None)
+    assert gate.main() == gate.EXIT_PROMPT
+    (run,) = (tmp_path / "runs").iterdir()
+    assert json.loads(run.read_text().splitlines()[-1])["launcher"]["refused"] == "prompt"
+
+
+def test_a_session_is_followed_by_yesterdays_digest(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "PROMPT_FILE", LAUNCHER / "prompt.txt")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: 0)
+    monkeypatch.setattr(gate, "check_claude_version", lambda *a, **k: None)
+    monkeypatch.setattr(gate, "credential_step", lambda env: env)
+    monkeypatch.setattr(
+        gate, "supervise", lambda argv, env, prompt, out: seen.update(p=prompt) or 14
+    )
+    monkeypatch.setattr(gate, "after_session", lambda out, day: seen.update(day=day))
+    assert gate.main() == gate.EXIT_CHILD  # the session's code stands, the digest is a report
+    assert seen["day"] == gate._digest().yesterday()
+    assert f'since "{seen["day"]}"' in seen["p"]

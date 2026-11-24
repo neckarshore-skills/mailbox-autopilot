@@ -108,7 +108,15 @@ def test_the_installed_paths_are_the_launchers_paths():
     )
     assert _pin(LAUNCHER / "launch.sh", "UV") == plists.UV
     assert _pin(LAUNCHER / "install.sh", "BOT_USER") == gate.BOT_USER
-    for name in ("gate.py", "retention.py", "settings.json", "host.json", "launch.sh"):
+    for name in (
+        "digest.py",
+        "gate.py",
+        "host.json",
+        "launch.sh",
+        "prompt.txt",
+        "retention.py",
+        "settings.json",
+    ):
         assert name in text
 
 
@@ -233,3 +241,47 @@ def test_a_run_that_died_after_the_clear_is_healed_by_the_next(flagged_log):
     assert retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND) == 0
     assert flagged_log.stat().st_flags & stat.UF_APPEND
     assert sorted(p.name for p in flagged_log.parent.iterdir()) == ["host-audit.log"]
+
+
+# ---- stderr rotation (L13 files, L5 run-file class: 14 days) ----
+
+
+def test_the_rotated_files_are_the_plists_stderr_paths():
+    assert sorted(retention.STDERR_FILES) == sorted(
+        [
+            Path(plists.launcher()["StandardErrorPath"]),
+            Path(plists.retention()["StandardErrorPath"]),
+        ]
+    )
+
+
+def test_rotate_moves_a_filled_stderr_file_and_leaves_an_empty_one(tmp_path):
+    full, empty = tmp_path / "launcher.stderr", tmp_path / "retention.stderr"
+    full.write_text("uv refused\n")
+    empty.write_text("")
+    dest = tmp_path / "stderr"
+    moved = retention.rotate_stderr([full, empty, tmp_path / "absent.stderr"], dest, 1764000000.0)
+    assert moved == ["launcher.stderr-20251124T160000Z"]
+    assert not full.exists() and empty.exists()
+    assert (dest / moved[0]).read_text() == "uv refused\n"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+
+
+def test_rotate_leaves_a_symlink_alone(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("x")
+    link = tmp_path / "launcher.stderr"
+    link.symlink_to(target)
+    assert retention.rotate_stderr([link], tmp_path / "stderr", time.time()) == []
+    assert link.is_symlink()
+
+
+def test_rotated_stderr_is_pruned_at_14_days(tmp_path):
+    dest = tmp_path / "stderr"
+    dest.mkdir()
+    old, new = dest / "launcher.stderr-old", dest / "launcher.stderr-new"
+    old.write_text("x")
+    new.write_text("y")
+    now = time.time()
+    os.utime(old, (now - 15 * 86400, now - 15 * 86400))
+    assert retention.prune_dir(dest, retention.RUN_DAYS, now) == ["launcher.stderr-old"]

@@ -1,0 +1,8 @@
+You read the metadata of one mailbox's INBOX. Your tools are search and read. They return metadata records, never a subject or any text of a mail.
+
+1. Call search with since "{since}" and limit 100.
+2. If its answer says "truncated": true, call search once for each size bucket, small, medium, large and huge, each with since "{since}" and limit 100.
+3. Do not call read: search already returns every field.
+4. Answer with one line: how many records you saw.
+
+The launcher counts the owner's digest from the search results, not from your answer.

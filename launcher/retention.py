@@ -3,6 +3,8 @@
 - run files (stdout and transcript, one per run): 14 days, by modification time
 - digests: 30 days, by modification time
 - host-audit.log: 90 days, by the `timestamp` of each line
+- launcher.stderr and retention.stderr (L13): moved aside once a day when not empty, and
+  the moved files kept 14 days, like the run files, since claude's own stderr lands there
 
 The audit log carries the system append-only flag, which only root can clear, and only at
 securelevel 0. It is pruned by writing the kept lines to a new file beside it, giving that
@@ -29,6 +31,8 @@ BASE = Path("/Library/Application Support/mailbox-autopilot")
 RUNS_DIR = BASE / "runs"
 DIGESTS_DIR = BASE / "digests"
 HOST_AUDIT = BASE / "host-audit.log"
+STDERR_FILES = (BASE / "launcher.stderr", BASE / "retention.stderr")  # plists.py, L13
+STDERR_DIR = BASE / "stderr"
 
 RUN_DAYS = 14
 DIGEST_DAYS = 30
@@ -51,6 +55,26 @@ def prune_dir(directory: Path, days: int, now: float) -> list[str]:
             entry.unlink()
             removed.append(entry.name)
     return removed
+
+
+def rotate_stderr(paths, dest: Path, now: float) -> list[str]:
+    """Move each filled stderr file into `dest` under a dated name. launchd opens the path
+    afresh each time it starts the job, and this job runs outside the run hours, so the
+    next run writes a new file. An empty file stays; a symlink is never touched."""
+    dest.mkdir(mode=0o700, exist_ok=True)
+    stamp = datetime.fromtimestamp(now, UTC).strftime("%Y%m%dT%H%M%SZ")
+    moved = []
+    for path in paths:
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
+            continue
+        name = f"{path.name}-{stamp}"
+        os.replace(path, dest / name)
+        moved.append(name)
+    return moved
 
 
 def _line_time(line: bytes) -> datetime | None:
@@ -109,6 +133,8 @@ def main() -> int:
         "runs": prune_dir(RUNS_DIR, RUN_DAYS, now),
         "digests": prune_dir(DIGESTS_DIR, DIGEST_DAYS, now),
         "audit_lines_dropped": prune_audit(HOST_AUDIT, AUDIT_DAYS, now),
+        "stderr_rotated": rotate_stderr(STDERR_FILES, STDERR_DIR, now),
+        "stderr_pruned": prune_dir(STDERR_DIR, RUN_DAYS, now),
     }
     print(json.dumps({"retention": report}, sort_keys=True), file=sys.stderr)
     return 0
