@@ -545,5 +545,22 @@ def test_a_session_is_followed_by_yesterdays_digest(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(gate, "after_session", lambda out, day: seen.update(day=day))
     assert gate.main() == gate.EXIT_CHILD  # the session's code stands, the digest is a report
-    assert seen["day"] == gate._digest().yesterday()
+    assert seen["day"] == gate.yesterday()
     assert f'since "{seen["day"]}"' in seen["p"]
+
+
+def test_a_missing_digest_file_does_not_stop_the_session(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(gate, "DIGEST", tmp_path / "absent.py")
+    monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "DIGESTS_DIR", tmp_path / "digests")
+    monkeypatch.setattr(gate, "PROMPT_FILE", LAUNCHER / "prompt.txt")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: 0)
+    monkeypatch.setattr(gate, "check_claude_version", lambda *a, **k: None)
+    monkeypatch.setattr(gate, "credential_step", lambda env: env)
+    monkeypatch.setattr(gate, "supervise", lambda *a: started.append(1) or gate.EXIT_OK)
+    assert gate.main() == gate.EXIT_OK and started == [1]
+    (run,) = (tmp_path / "runs").iterdir()
+    assert json.loads(run.read_text().splitlines()[-1])["launcher"] == {
+        "digest_failed": "FileNotFoundError"
+    }

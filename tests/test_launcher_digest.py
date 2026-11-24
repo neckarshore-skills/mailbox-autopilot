@@ -184,19 +184,64 @@ def test_a_symlinked_run_file_is_not_followed(tmp_path):
     ("since", "kwargs", "complete"),
     [
         (SINCE, {}, True),
-        ("2026-11-01", {}, True),
+        ("2026-11-01", {}, False),  # a since the launcher did not give: the bot strayed
         (SINCE, {"truncated": True}, False),
-        (DAY, {}, False),  # starts after the previous run's day: a gap
+        (DAY, {}, False),  # not the launcher's day either
         (SINCE, {"unseen": True}, False),  # a filtered search does not see every mail
         (SINCE, {"flagged": False}, False),
         ("23.11.2026", {}, False),
     ],
-    ids=["plain", "earlier", "truncated", "gap", "unseen", "flagged", "bad-since"],
+    ids=["plain", "stray-since", "truncated", "late-since", "unseen", "flagged", "bad-since"],
 )
 def test_coverage(tmp_path, since, kwargs, complete):
     runs = tmp_path / "runs"
     search_run(runs, PREV, [], since="2026-11-21")
     search_run(runs, D_RUN, [rec("1")], since=since, **kwargs)
+    assert digest.collect(runs, DAY).complete is complete
+
+
+def test_a_gap_since_the_previous_searching_run_makes_the_day_incomplete(tmp_path):
+    runs = tmp_path / "runs"
+    search_run(runs, "run-20261120T190000Z.jsonl", [rec("1")], since="2026-11-19")
+    search_run(runs, D_RUN, [rec("2")])
+    assert not digest.collect(runs, DAY).complete
+
+
+def test_only_the_launchers_search_counts_records(tmp_path):
+    """The bot picks its arguments. A read of an old UID, or a search from an earlier day,
+    would make old mail look new, so neither contributes a record or coverage."""
+    runs = tmp_path / "runs"
+    write_run(
+        runs,
+        D_RUN,
+        [
+            tool_use("s", since=SINCE),
+            tool_result("s", [rec("50")]),
+            tool_use("r", name="mcp__mailbox__read", uid="3"),
+            tool_result("r", [rec("3")]),
+            tool_use("o", since="2020-01-01"),
+            tool_result("o", [rec("4"), rec("5")]),
+        ],
+    )
+    got = digest.collect(runs, DAY)
+    assert sorted(got.records) == ["50"]
+    assert got.complete  # the launcher's search was whole; the strays add nothing
+
+
+def test_a_stray_search_alone_gives_at_least(tmp_path):
+    runs = tmp_path / "runs"
+    search_run(runs, D_RUN, [rec("4")], since="2020-01-01")
+    got = digest.collect(runs, DAY)
+    assert got.records == {} and not got.complete
+
+
+@pytest.mark.parametrize(("low", "complete"), [(101, True), (120, True), (121, False)])
+def test_a_truncated_search_that_overlaps_the_previous_run_is_whole(tmp_path, low, complete):
+    """search returns the newest records by UID. If its lowest UID is at or below the
+    highest the previous searching run saw, nothing between the two runs was skipped."""
+    runs = tmp_path / "runs"
+    search_run(runs, D_RUN, [rec(str(u)) for u in range(120, 100, -1)])
+    search_run(runs, D_RUN2, [rec(str(u)) for u in range(low + 99, low - 1, -1)], truncated=True)
     assert digest.collect(runs, DAY).complete is complete
 
 

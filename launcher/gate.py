@@ -28,7 +28,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # ---- pinned (L8): change only together with the host, and James reads the change ----
@@ -200,6 +200,12 @@ def _digest():
     return module
 
 
+def yesterday() -> str:
+    """The day the bot searches from and whose digest the run rebuilds. Computed here, so a
+    missing or broken digest.py cannot stop a session."""
+    return (datetime.now().date() - timedelta(days=1)).isoformat()
+
+
 def after_session(out, day: str, runs_dir: Path = RUNS_DIR, digests_dir: Path = DIGESTS_DIR):
     """Rebuild the digest of `day` from every run file. A failure is noted and does not
     change the run's exit code: the digest is a report, not a gate."""
@@ -360,7 +366,7 @@ def main() -> int:
         if (reason := check_claude_version(CLAUDE, build_env())) is not None:
             note(out, refused="version", reason=reason)
             return EXIT_VERSION
-        day = _digest().yesterday()
+        day = yesterday()
         try:
             prompt = load_prompt(PROMPT_FILE, day)
         except PromptUnavailable as exc:

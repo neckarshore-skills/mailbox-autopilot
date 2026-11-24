@@ -15,10 +15,16 @@ Never the record's `date`: lean.py fills it from the Date header first, which th
 writes, so a mail dated 1999 would drop out of every digest. A mail that arrives after the
 day's last run counts on the next day.
 
-How complete a day is: `search` returns at most 100 records and has no offset. The digest
-says an exact number only if every run of the day that searched saw everything since the
-run before it: from a `since` no later than the previous searching run's day, with no flag
-filter, and untruncated or with all four size buckets untruncated. Otherwise it says
+Which results count: only a `search` with the `since` the launcher wrote into the prompt
+(the run file's day minus one) and no flag filter. The bot chooses its own arguments, and a
+`read` of an old UID or a search from an earlier day would make old mail look new, so those
+add no record and no coverage. A bot that strays makes the digest say "at least".
+
+How complete a day is: `search` returns at most 100 records, newest UID first, and has no
+offset. The digest says an exact number only if every run of the day that searched saw
+everything since the run before it: the previous searching run was no older than
+yesterday, and the launcher's search was untruncated, or covered all four size buckets
+untruncated, or reached down to a UID the previous run had seen. Otherwise it says
 "at least". A day with no searching run says "at least 0".
 
 Standard library only, nothing imported from the package, like gate.py.
@@ -60,10 +66,6 @@ class Collected:
     complete: bool = False
 
 
-def yesterday(today: date | None = None) -> str:
-    return ((today or date.today()) - timedelta(days=1)).isoformat()
-
-
 def _answer(content: object) -> dict | None:
     if isinstance(content, list):  # the host's shape: text blocks
         texts = [b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"]
@@ -88,17 +90,37 @@ def _blocks(event: dict) -> list:
 @dataclass
 class _Run:
     day: str  # from the file name, UTC
-    seen: list[tuple[str, dict]] = field(default_factory=list)
-    searched: bool = False
-    complete: bool = False  # one search, or four buckets, saw everything from `since`
-    since: str | None = None  # the latest `since` among the complete searches
+    seen: list[tuple[str, dict]] = field(default_factory=list)  # from the launcher's search
+    searched: bool = False  # any search, including one the bot strayed with
+    whole: bool = False  # an untruncated search, or all four buckets untruncated
+    low_truncated: int | None = None  # lowest UID of a truncated unbucketed search
+
+    @property
+    def high(self) -> int | None:
+        return max((int(uid) for uid, _ in self.seen), default=None)
+
+
+def _expected_since(run_day: str) -> str:
+    """The `since` the launcher wrote into the prompt for a run on `run_day`."""
+    return (date.fromisoformat(run_day) - timedelta(days=1)).isoformat()
+
+
+def _launchers_search(inp: object, expected: str) -> bool:
+    """True for a search with the launcher's `since` and no flag filter: one that sees
+    every mail since yesterday. The bot picks its own arguments, so any other search, and
+    every `read`, counts no record and no coverage: an earlier `since` or a read of an old
+    UID would make old mail look new."""
+    if not isinstance(inp, dict) or "unseen" in inp or "flagged" in inp:
+        return False
+    return inp.get("since") == expected and inp.get("size") in (None, *BUCKETS)
 
 
 def _read_run(path: Path) -> _Run:
     y, m, d = _RUN_NAME.fullmatch(path.name).groups()
     run = _Run(day=f"{y}-{m}-{d}")
-    uses: dict[str, tuple[str, object]] = {}
-    buckets: dict[str, str] = {}
+    expected = _expected_since(run.day)
+    uses: dict[str, object] = {}
+    buckets: set[str] = set()
     for line in path.read_bytes().splitlines():
         try:
             event = json.loads(line)
@@ -108,45 +130,42 @@ def _read_run(path: Path) -> _Run:
             continue
         if event.get("type") == "assistant":
             for b in _blocks(event):
-                if b.get("type") == "tool_use" and b.get("name") in (SEARCH, READ):
-                    uses[str(b.get("id"))] = (b["name"], b.get("input"))
+                if b.get("type") == "tool_use" and b.get("name") == SEARCH:
+                    uses[str(b.get("id"))] = b.get("input")
             continue
         if event.get("type") != "user":
             continue
         for b in _blocks(event):
             if b.get("type") != "tool_result" or b.get("is_error"):
                 continue
-            use = uses.get(str(b.get("tool_use_id")))
-            answer = _answer(b.get("content")) if use else None
+            key = str(b.get("tool_use_id"))
+            answer = _answer(b.get("content")) if key in uses else None
             if answer is None:
                 continue
+            run.searched = True
+            inp = uses[key]
+            if not _launchers_search(inp, expected):
+                continue
+            uids = []
             for r in answer["messages"]:
                 uid = r.get("uid") if isinstance(r, dict) else None
                 if isinstance(uid, str) and _UID.fullmatch(uid):
                     run.seen.append((uid, r))
-            name, inp = use
-            if name != SEARCH:
-                continue
-            run.searched = True
-            since = _since(inp)
-            if since is None or answer.get("truncated") is not False:
-                continue
+                    uids.append(int(uid))
+            truncated = answer.get("truncated") is not False
             size = inp.get("size")
-            if size is None:
-                run.complete, run.since = True, max(run.since or since, since)
-            elif size in BUCKETS:
-                buckets[size] = max(buckets.get(size, since), since)
-    if set(buckets) == BUCKETS and not run.complete:
-        run.complete, run.since = True, max(buckets.values())
+            if not truncated and size is None:
+                run.whole = True
+            elif not truncated:
+                buckets.add(size)
+            elif size is None and uids:
+                low = min(uids)
+                run.low_truncated = (
+                    low if run.low_truncated is None else min(run.low_truncated, low)
+                )
+    if buckets == BUCKETS:
+        run.whole = True
     return run
-
-
-def _since(inp: object) -> str | None:
-    """The `since` of a search that sees every mail from that day on, else None."""
-    if not isinstance(inp, dict) or "unseen" in inp or "flagged" in inp:
-        return None
-    since = inp.get("since")
-    return since if isinstance(since, str) and _ISO_DAY.fullmatch(since) else None
 
 
 def collect(runs_dir: Path, day: str) -> Collected:
@@ -170,8 +189,16 @@ def collect(runs_dir: Path, day: str) -> Collected:
         if not run.searched:
             continue
         if run.day == day:
-            no_gap = previous is None or (run.since is not None and run.since <= previous.day)
-            complete = (complete is not False) and run.complete and no_gap
+            no_gap = previous is None or _expected_since(run.day) <= previous.day
+            # search answers newest UID first: a page reaching down to what the previous
+            # run saw proves that nothing between the two runs was skipped
+            overlaps = (
+                run.low_truncated is not None
+                and previous is not None
+                and previous.high is not None
+                and run.low_truncated <= previous.high
+            )
+            complete = (complete is not False) and no_gap and (run.whole or overlaps)
         previous = run
     out.records = {uid: r for uid, (seen_on, r) in first.items() if seen_on == day}
     out.complete = bool(complete)
