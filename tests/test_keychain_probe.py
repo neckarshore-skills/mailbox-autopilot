@@ -117,12 +117,17 @@ def _argv():
         "u",
         "--group",
         "g",
+        "--search-domain",
+        "user",
     ]
 
 
+PATH_MISSING = {"outcome": "status", "osstatus": -25300, "value_equals_canary": False}
+
+
 @pytest.fixture
-def no_system(monkeypatch):
-    monkeypatch.setattr(job, "facts", lambda group: {"uid": 1})
+def no_system(lists, monkeypatch):
+    monkeypatch.setattr(job, "read_at", lambda path, service: PATH_MISSING)
 
 
 def test_the_value_never_reaches_the_output(no_system, monkeypatch, capsys):
@@ -169,6 +174,60 @@ def test_each_answer_of_the_keychain_is_told_apart(monkeypatch, answer, outcome,
     monkeypatch.setattr(macos.Keyring, "get_password", answer)
     read = job.read_item(job.SERVICE)
     assert (read["outcome"], read["osstatus"]) == (outcome, status)
+
+
+@pytest.fixture
+def framework(monkeypatch):
+    """The Security framework calls `read_at` makes, stood in for. The real calls run only in
+    the macOS CI job (tests/test_keychain_probe_real.py), never on a laptop's own keychain."""
+    from keyring.backends.macOS import api
+
+    state = {"open": 0, "copy": -25300, "value": job.CANARY, "queries": []}
+
+    def open_keychain(path, ref):
+        state["path"] = path
+        return state["open"]
+
+    def copy(query, ref):
+        state["queries"].append(query)
+        return state["copy"]
+
+    def query(**kwargs):
+        return kwargs
+
+    monkeypatch.setattr(api._sec, "SecKeychainOpen", open_keychain, raising=False)
+    monkeypatch.setattr(api._found, "CFArrayCreate", lambda *a: "one keychain", raising=False)
+    monkeypatch.setattr(api, "create_query", query)
+    monkeypatch.setattr(api, "SecItemCopyMatching", copy)
+    monkeypatch.setattr(api, "cfstr_to_str", lambda data: state["value"])
+    return state
+
+
+@pytest.mark.parametrize("status", [-25300, -25294, -25308, -128, -25293])
+def test_the_path_read_keeps_the_frameworks_status(framework, status):
+    """Not-found is never turned into `None` here: that is the mapping that hid sitting 1
+    and sitting 2 behind a `none`."""
+    framework["copy"] = status
+    read = job.read_at("/k/probe.keychain-db", job.SERVICE)
+    assert read == {"outcome": "status", "osstatus": status, "value_equals_canary": False}
+    assert framework["path"] == b"/k/probe.keychain-db"
+    sent = framework["queries"][0]
+    assert sent["kSecMatchSearchList"] == "one keychain"
+    assert (sent["kSecAttrService"], sent["kSecAttrAccount"]) == (job.SERVICE, job.ACCOUNT)
+
+
+def test_the_path_read_names_a_keychain_it_cannot_open(framework):
+    framework["open"] = -25294
+    read = job.read_at("/k/absent.keychain-db", job.SERVICE)
+    assert read["osstatus"] == -25294 and framework["queries"] == []
+
+
+@pytest.mark.parametrize("value, equal", [(job.CANARY, True), ("something else", False)])
+def test_the_path_read_compares_and_drops_the_value(framework, value, equal):
+    framework["copy"], framework["value"] = 0, value
+    read = job.read_at("/k/probe.keychain-db", job.SERVICE)
+    assert read == {"outcome": "value", "osstatus": 0, "value_equals_canary": equal}
+    assert value not in json.dumps(read)
 
 
 def test_a_failing_arm_still_prints_its_line(monkeypatch, capsys):
@@ -246,9 +305,9 @@ def _arm(name, read):
 @pytest.mark.parametrize(
     "reads, partition",
     [
-        ((True, True, True), "none"),
-        ((False, True, True), "unsigned"),
-        ((False, False, True), "cdhash"),
+        ((True, True, True), "list none"),
+        ((False, True, True), "list unsigned"),
+        ((False, False, True), "list cdhash"),
         ((False, False, False), ""),
     ],
     ids=["3a", "3b", "3c", "none"],
@@ -256,6 +315,14 @@ def _arm(name, read):
 def test_later_arms_use_the_half_that_read_and_none_stops_them(tmp_path, reads, partition):
     lines = [_arm(f"arm3{h}", r) for h, r in zip("abc", reads, strict=True)]
     assert show.winner(_report(tmp_path, _arm("arm1", True), *lines)) == partition
+
+
+def test_the_list_route_wins_over_the_path_route_and_the_path_route_counts(tmp_path):
+    """The list route leaves the host's read path as it is, so it is preferred."""
+    path_b = {"arm": "arm3b", "read_path": {"value_equals_canary": True}}
+    assert show.winner(_report(tmp_path, path_b)) == "path unsigned"
+    both = [path_b, _arm("arm3c", True)]
+    assert show.winner(_report(tmp_path, *both)) == "list cdhash"
 
 
 @pytest.mark.parametrize(
@@ -385,6 +452,7 @@ def _job(action):
 def test_the_job_sets_the_search_list_before_it_reads(lists, monkeypatch, capsys):
     order = []
     monkeypatch.setattr(job, "drop_to", lambda user: None)
+    monkeypatch.setattr(job, "read_at", lambda path, service: PATH_MISSING)
     monkeypatch.setattr(
         job, "read_item", lambda service: order.append(len(lists["calls"])) or {"outcome": "none"}
     )
@@ -395,15 +463,31 @@ def test_the_job_sets_the_search_list_before_it_reads(lists, monkeypatch, capsys
     assert record["search"]["on_list"] is True and record["search"]["domain"] == "user"
 
 
-def test_a_keychain_that_is_not_on_the_list_is_not_read(lists, monkeypatch, capsys):
-    """Sitting 1: a read past the list says `none`, which looks like an answer and is not."""
+def test_a_keychain_that_is_not_on_the_list_is_not_read_through_it(lists, monkeypatch, capsys):
+    """Sitting 1: a read past the list says `none`, which looks like an answer and is not.
+    The path route still runs, because it does not go through the list."""
     lists["works"] = set()
+    paths = []
     monkeypatch.setattr(job, "drop_to", lambda user: None)
     monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("read past the list"))
+    monkeypatch.setattr(job, "read_at", lambda path, service: paths.append(path) or PATH_MISSING)
     job.main(_job("unlock-read") + ["--search-domain", "user"])
     record = json.loads(capsys.readouterr().out)
     assert record["search"]["on_list"] is False
-    assert "read" not in record and "unlock" not in record
+    assert "read" not in record and record["list_read"] == "not reached"
+    assert record["read_path"] == PATH_MISSING and paths[0].endswith("probe.keychain-db")
+    assert record["unlock"] == {"rc": 0, "errors": []}
+
+
+def test_a_job_without_a_list_reads_by_path_only(lists, monkeypatch, capsys):
+    """Arm 1, and every arm when no domain reached the effective list in arm 2."""
+    monkeypatch.setattr(job, "drop_to", lambda user: None)
+    monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("a list read, no list"))
+    monkeypatch.setattr(job, "read_at", lambda path, service: PATH_MISSING)
+    job.main(_job("read"))
+    record = json.loads(capsys.readouterr().out)
+    assert "search" not in record and record["list_read"] == "not reached"
+    assert record["read_path"]["osstatus"] == -25300
 
 
 def test_sitting_2_a_domain_list_that_holds_is_not_the_list_a_read_goes_through(
@@ -415,6 +499,7 @@ def test_sitting_2_a_domain_list_that_holds_is_not_the_list_a_read_goes_through(
     lists["reaches"] = set()
     monkeypatch.setattr(job, "drop_to", lambda user: None)
     monkeypatch.setattr(job, "read_item", lambda service: pytest.fail("read past the list"))
+    monkeypatch.setattr(job, "read_at", lambda path, service: PATH_MISSING)
     job.main(_job("unlock-read") + ["--search-domain", "user"])
     search = json.loads(capsys.readouterr().out)["search"]
     assert search["domain_on_list"] is True
@@ -539,10 +624,17 @@ if domain:
     r["search"] = {"domain": domain, "target": kc, "search_list": effective,
                    "on_list": listed or wrong}
     listed = listed and not wrong
-if action in ("read", "unlock-read") and (listed or not domain):
-    hit = listed and arm in os.environ.get("WALK_READS", "").split(",")
-    outcome = "value" if hit else "none"
-    r["read"] = {"outcome": outcome, "osstatus": None, "value_equals_canary": hit}
+if action in ("read", "unlock-read"):
+    # job.both_reads: the list route only where the list reaches, the path route always.
+    if listed:
+        hit = arm in os.environ.get("WALK_READS", "").split(",")
+        r["read"] = {"outcome": "value" if hit else "none", "osstatus": None,
+                     "value_equals_canary": hit}
+    else:
+        r["list_read"] = "not reached"
+    hit = arm in os.environ.get("WALK_PATH_READS", "").split(",")
+    r["read_path"] = {"outcome": "value" if hit else "status", "osstatus": 0 if hit else -25300,
+                      "value_equals_canary": hit}
 open(doc["StandardOutPath"], "a").write(json.dumps(r) + "\n")
 """
 FAKE_ID = r"""#!/bin/bash
@@ -746,19 +838,44 @@ def test_the_second_domain_is_tried_and_kept_when_the_first_does_not_hold(walk):
     assert all(a[a.index("--search-domain") + 1] == "dynamic" for a in later if "unlock-read" in a)
 
 
-def test_no_domain_that_holds_stops_every_reading_arm(walk):
-    r = walk("setup", "arm2", WALK_DOMAINS="")
-    assert r.returncode == 2 and "no domain put the keychain on" in r.stderr
-    for arm in ("arm3", "arm6", "arm7", "arm4-install", "arm4b", "arm5-read"):
+def test_no_domain_that_holds_leaves_the_path_route_alone(walk):
+    """Row 4b of the sheet: no domain reaches the effective list. The run goes on, every
+    reading job reads by path only and sets no list, and the winner says so."""
+    env = {"WALK_DOMAINS": "", "WALK_PATH_READS": "arm3c"}
+    r = walk("setup", "arm2", **env)
+    assert r.returncode == 0, r.stderr
+    assert "the path route reads alone" in r.stdout
+    r = walk("arm3", **env)
+    assert r.returncode == 0, r.stderr
+    assert "route and partition that read: path cdhash" in r.stdout
+    r = walk("arm7", "arm4-install", **env)
+    assert r.returncode == 0, r.stderr
+    reading = [a for a in walk.jobs() if a[a.index("--action") + 1] in ("read", "unlock-read")]
+    assert reading and all("--search-domain" not in a for a in reading)
+    boot = plistlib.loads(
+        (walk.root / "Library/LaunchDaemons/ai.neckarshore.keychain-probe.plist").read_bytes()
+    )["ProgramArguments"]
+    assert "--search-domain" not in boot
+    later = [a for a in walk.jobs() if a[a.index("--arm") + 1] in ("arm7-prepare", "arm4-prepare")]
+    assert later and all(a[a.index("--partition") + 1] == "cdhash" for a in later)
+
+
+def test_arm_3_reading_on_neither_route_stops_the_later_arms(walk):
+    r = walk("setup", "arm2", "arm3", WALK_DOMAINS="")
+    assert r.returncode == 2 and "on either route" in r.stderr
+    for arm in ("arm6", "arm7", "arm4-install", "arm4b"):
         r = walk(arm)
-        assert r.returncode == 2 and "no domain put the keychain on" in r.stderr, arm
+        assert r.returncode == 2 and "on either route" in r.stderr, arm
 
 
 def test_a_job_that_calls_a_domain_list_reached_does_not_get_past_the_runner(walk):
     """Sitting 2 from the runner's side: the job said `on_list` for the domain's own list.
     The runner judges the effective list in the record itself and stops."""
     r = walk("setup", "arm2", WALK_DOMAIN_ONLY="user,dynamic")
-    assert r.returncode == 2 and "no domain put the keychain on" in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert "the path route reads alone" in r.stdout
+    reading = [a for a in walk.jobs() if a[a.index("--action") + 1] == "read"]
+    assert reading and all("--search-domain" not in a for a in reading)
 
 
 def test_a_reading_arm_without_the_list_stops_the_run(walk):
@@ -766,9 +883,9 @@ def test_a_reading_arm_without_the_list_stops_the_run(walk):
     gate must stop it instead of reporting `no canary`."""
     script = walk.root / "run/probe.sh"
     text = script.read_text(encoding="utf-8")
-    good = 'read_job arm2 drop read --search-domain "$domain"'
+    good = 'run_job_with "$@" --search-domain "$domain"'
     assert good in text
-    script.write_text(text.replace(good, "read_job arm2 drop read"), encoding="utf-8")
+    script.write_text(text.replace(good, 'run_job_with "$@"'), encoding="utf-8")
     r = walk("setup", "arm2")
     assert r.returncode == 2 and "not on the job's search list" in r.stderr
 

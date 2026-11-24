@@ -28,6 +28,11 @@ def reached(r: dict) -> bool:
     )
 
 
+def _part(name: str, read: dict) -> str:
+    canary = "CANARY READ" if read.get("value_equals_canary") else "no canary"
+    return f"{name}: {canary}, {read.get('outcome')}, OSStatus {read.get('osstatus')}"
+
+
 def line(r: dict) -> str:
     head = f"{r.get('arm')}/{r.get('mode')}"
     if "failed" in r:
@@ -35,21 +40,28 @@ def line(r: dict) -> str:
     facts = r.get("facts", {})
     who = f"uid {facts.get('uid')}, console {facts.get('console_user')}"
     search = r.get("search")
-    if search is not None and not reached(r):
-        held = " (its own domain list has it)" if search.get("domain_on_list") else ""
-        return f"{head}: NOT ON THE SEARCH LIST ({search.get('domain')}){held}, no read ({who})"
-    if r.get("action") == "search":
+    off_list = search is not None and not reached(r)
+    held = " (its own domain list has it)" if off_list and search.get("domain_on_list") else ""
+    if r.get("action") == "search" or (off_list and "read_path" not in r):
+        if off_list:
+            return f"{head}: NOT ON THE SEARCH LIST ({search.get('domain')}){held}, no read ({who})"
         return f"{head}: on the search list ({search.get('domain')}) ({who})"
-    read = r.get("read")
-    if read is None:
+    if "read" not in r and "read_path" not in r:
         step = r.get("prepare", r.get("reset", {}))
         return f"{head}: {r.get('action')} {json.dumps(step)} ({who})"
-    canary = "CANARY READ" if read.get("value_equals_canary") else "no canary"
+    parts = []
+    if "read" in r:
+        parts.append(_part("list", r["read"]))
+    elif off_list:
+        parts.append(f"list: NOT ON THE SEARCH LIST ({search.get('domain')}){held}")
+    else:
+        parts.append("list: no list in this job")
+    if "read_path" in r:
+        parts.append(_part("path", r["read_path"]))
     unlock = r.get("unlock", {})
-    failed = " UNLOCK FAILED," if unlock.get("rc") or unlock.get("errors") else ""
-    return (
-        f"{head}: {canary},{failed} {read.get('outcome')}, OSStatus {read.get('osstatus')} ({who})"
-    )
+    if unlock.get("rc") or unlock.get("errors"):
+        parts.insert(0, "UNLOCK FAILED")
+    return f"{head}: {'; '.join(parts)} ({who})"
 
 
 def records(path: str) -> list[dict]:
@@ -74,11 +86,13 @@ def listed(path: str) -> bool:
 
 
 def winner(path: str) -> str:
-    """The first half of arm 3 that read the canary, or nothing."""
-    read = {r.get("arm"): r.get("read", {}) for r in records(path)}
-    for arm, partition in HALVES:
-        if read.get(arm, {}).get("value_equals_canary"):
-            return partition
+    """Route and partition of the first half of arm 3 that read the canary, the list route
+    first because it leaves the host's read path as it is, or nothing."""
+    found = {r.get("arm"): r for r in records(path)}
+    for route, key in (("list", "read"), ("path", "read_path")):
+        for arm, partition in HALVES:
+            if ((found.get(arm) or {}).get(key) or {}).get("value_equals_canary"):
+                return f"{route} {partition}"
     return ""
 
 

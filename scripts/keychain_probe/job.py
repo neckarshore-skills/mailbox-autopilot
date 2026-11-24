@@ -184,6 +184,47 @@ def read_item(service: str) -> dict:
     return {"outcome": "value", "osstatus": None, "value_equals_canary": value == CANARY}
 
 
+def read_at(path: str, service: str) -> dict:
+    """The second route: the keychain by its path, past every search list. The same query
+    keyring builds (its own helpers, so the bytes on the wire match), plus
+    `kSecMatchSearchList` with this one keychain. Sitting 2 showed a job in launchd's system
+    session whose effective list ignores the user domain; if no domain reaches it, this is
+    the only read left, and it is what the host would have to do instead of keyring
+    (run sheet, row 4b). The status is the Security framework's own, every time: keyring
+    turns not-found into `None`, and twice now a `none` was taken for an answer."""
+    import ctypes
+    from ctypes import byref, c_void_p
+
+    from keyring.backends.macOS import api
+
+    open_keychain = api._sec.SecKeychainOpen
+    open_keychain.restype = api.OS_status
+    open_keychain.argtypes = (ctypes.c_char_p, ctypes.POINTER(c_void_p))
+    array = api._found.CFArrayCreate
+    array.restype = c_void_p
+    array.argtypes = (c_void_p, c_void_p, ctypes.c_long, c_void_p)
+    keychain = c_void_p()
+    status = open_keychain(path.encode(), byref(keychain))
+    if status:
+        return {"outcome": "status", "osstatus": status, "value_equals_canary": False}
+    callbacks = ctypes.addressof(c_void_p.in_dll(api._found, "kCFTypeArrayCallBacks"))
+    keychains = array(None, (c_void_p * 1)(keychain), 1, callbacks)
+    query = api.create_query(
+        kSecClass=api.k_("kSecClassGenericPassword"),
+        kSecMatchLimit=api.k_("kSecMatchLimitOne"),
+        kSecAttrService=service,
+        kSecAttrAccount=ACCOUNT,
+        kSecReturnData=True,
+        kSecMatchSearchList=keychains,
+    )
+    data = c_void_p()
+    status = api.SecItemCopyMatching(query, byref(data))
+    if status:
+        return {"outcome": "status", "osstatus": status, "value_equals_canary": False}
+    value = api.cfstr_to_str(data)
+    return {"outcome": "value", "osstatus": 0, "value_equals_canary": value == CANARY}
+
+
 def _add_item(path: str, *, trust: bool) -> str:
     trusted = f" -T {_python()}" if trust else ""
     return f"add-generic-password -s {SERVICE} -a {ACCOUNT} -w {CANARY}{trusted} {path}"
@@ -216,12 +257,24 @@ def prepare(secret: str, *, trust: bool, partition: str) -> dict:
     return security_script(lines, secret)
 
 
-def unlock_and_read(secret: str, service: str) -> dict:
+def both_reads(service: str, path: str, *, reached: bool) -> dict:
+    """The list route only where this job's effective list reaches the keychain, the path
+    route always. A list read that could not reach it is named, never run: its `none`
+    would look like an answer."""
+    reads: dict = {"read_path": read_at(path, service)}
+    if reached:
+        reads["read"] = read_item(service)
+    else:
+        reads["list_read"] = "not reached"
+    return reads
+
+
+def unlock_and_read(secret: str, service: str, *, reached: bool) -> dict:
     path = _keychain_path()
     unlocked = security_script([f"unlock-keychain -p {secret} {path}"], secret)
-    read = read_item(service)
+    reads = both_reads(service, path, reached=reached)
     locked = security_script([f"lock-keychain {path}"])
-    return {"unlock": unlocked, "read": read, "lock_again": locked}
+    return {"unlock": unlocked, **reads, "lock_again": locked}
 
 
 def reset() -> dict:
@@ -278,14 +331,16 @@ def run_arm(args) -> dict:
             "default_keychain": _keychains(default),
         }
         return record
+    reached = False  # no list set in this job: the session's own list says nothing
     if args.search_domain:
         record["search"] = use_search_list(args.search_domain, _keychain_path(args.keychain))
-        if args.action == "search" or not record["search"]["on_list"]:
-            return record  # no read past the list: its `none` would look like an answer
+        if args.action == "search":
+            return record
+        reached = record["search"]["on_list"]
     if args.action == "read":
-        record["read"] = read_item(args.service)
+        record.update(both_reads(args.service, _keychain_path(args.keychain), reached=reached))
     elif args.action == "unlock-read":
-        record.update(unlock_and_read(secret, args.service))
+        record.update(unlock_and_read(secret, args.service, reached=reached))
     elif args.action == "reset":
         record["reset"] = reset()
     return record

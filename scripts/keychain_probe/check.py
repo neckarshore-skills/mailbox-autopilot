@@ -41,32 +41,55 @@ def _key(r: dict) -> str:
     return f"{r.get('arm')}/{r.get('mode')}"
 
 
-def _got(r: dict) -> tuple[str | None, str]:
-    """The class a record shows, or None when it holds no read, with the reason."""
-    if "failed" in r:
-        return None, f"failed in the job ({r['failed']})"
-    search = r.get("search")
-    if search is not None and not reached(r):
-        return None, f"not on the effective search list ({search.get('domain')}), no read"
-    read = r.get("read")
-    if read is None:
-        return None, "no read in the record"
-    detail = f"outcome {read.get('outcome')}, OSStatus {read.get('osstatus')}"
+# The path route keeps the Security framework's own status (job.read_at).
+PATH_CLASS = {-25300: MISSING, -25308: LOCKED}
+
+
+def _list_class(read: dict) -> str:
     if read.get("value_equals_canary"):
-        return CANARY, detail
+        return CANARY
     if read.get("outcome") == "KeyringLocked":
-        return LOCKED, detail
+        return LOCKED
     if read.get("outcome") == "none":
-        return MISSING, detail
-    return NO_CANARY, detail
+        return MISSING
+    return NO_CANARY
 
 
-def _fits(want: str, got: str | None) -> bool:
-    if got is None:
+def _path_class(read: dict) -> str:
+    if read.get("value_equals_canary"):
+        return CANARY
+    return PATH_CLASS.get(read.get("osstatus"), NO_CANARY)
+
+
+def _routes(r: dict) -> tuple[list[tuple[str, str | None, str]], str]:
+    """(route, class or None, detail) per route the record holds, or a reason it holds none.
+    A list route the job set but did not reach is a route with no class: in sitting 2 its
+    `none` was taken for "missing"."""
+    if "failed" in r:
+        return [], f"failed in the job ({r['failed']})"
+    out = []
+    search = r.get("search")
+    if "read" in r and (search is None or reached(r)):
+        read = r["read"]
+        detail = f"list {read.get('outcome')}, OSStatus {read.get('osstatus')}"
+        out.append(("list", _list_class(read), detail))
+    elif search is not None:
+        out.append(("list", None, f"not on the effective search list ({search.get('domain')})"))
+    if "read_path" in r:
+        read = r["read_path"]
+        out.append(("path", _path_class(read), f"path OSStatus {read.get('osstatus')}"))
+    return out, "" if out else "no read in the record"
+
+
+def _fits(want: str, routes: list[tuple[str, str | None, str]]) -> bool:
+    """A canary is expected on at least one route; everything else on every route."""
+    if not routes or any(got is None for _, got, _ in routes):
         return False
+    if want == CANARY:
+        return any(got == CANARY for _, got, _ in routes)
     if want == NO_CANARY:
-        return got != CANARY
-    return want == got
+        return all(got != CANARY for _, got, _ in routes)
+    return all(got == want for _, got, _ in routes)
 
 
 def judge(records: list[dict]) -> list[tuple[str, str, str]]:
@@ -78,19 +101,25 @@ def judge(records: list[dict]) -> list[tuple[str, str, str]]:
         if r is None:
             out.append(("OPEN", key, f"expected {want}, no record yet"))
             continue
-        got, detail = _got(r)
-        ok = _fits(want, got)
+        routes, why = _routes(r)
+        ok = _fits(want, routes)
+        detail = why or "; ".join(d for _, _, d in routes)
+        got = ", ".join(f"{name} {cls or '-'}" for name, cls, _ in routes) or "-"
         who = (r.get("facts") or {}).get("console_user")
         if ok and console is not None and who != console:
             ok, detail = False, f"{detail}, console {who}, expected {console}"
         verdict = "MATCHES" if ok else "DEVIATES"
-        out.append((verdict, key, f"expected {want}, got {got or '-'}: {detail}"))
+        out.append((verdict, key, f"expected {want}, got {got}: {detail}"))
     halves = [last.get(k) for k in ARM3]
     if all(h is None for h in halves):
         out.append(("OPEN", "arm3", "expected a canary in one half, no record yet"))
     else:
         read = [
-            k for k, h in zip(ARM3, halves, strict=True) if h is not None and _got(h)[0] == CANARY
+            f"{k} ({name})"
+            for k, h in zip(ARM3, halves, strict=True)
+            if h is not None
+            for name, cls, _ in _routes(h)[0]
+            if cls == CANARY
         ]
         if read:
             out.append(("MATCHES", "arm3", f"canary read by {', '.join(read)}"))

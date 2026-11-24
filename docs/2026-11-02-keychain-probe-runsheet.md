@@ -2,7 +2,7 @@
 
 **For the owner, at the target Mac, with Obi on the line.** It answers #76 L11: can a launchd job of a user who never logs in read a keychain? Without an answer the launcher cannot start. The design is James's read of 2026-11-02, section 6, and his read of this probe on #97.
 
-> **Important:** This creates a throwaway user and a LaunchDaemon, and it reboots the target Mac twice. Those are the first restarts since the Paperless backup was installed, so the sitting also proves that the backup survives one (step 15). Do not reboot between 02:00 and 04:00, and be done with step 12 before 02:00. Plan about an hour.
+> **Important:** This creates a throwaway user and a LaunchDaemon, and it reboots the target Mac twice. The Mac was last rebooted on 2026-11-21 at 15:15 and the backup ran after it (last success 2026-11-24 01:30 UTC, read over SSH before sitting 2), so step 15 proves again that the backup survives a restart, not for the first time. Do not reboot between 02:00 and 04:00, and be done with step 12 before 02:00. Plan about an hour.
 
 ## What it touches
 
@@ -26,6 +26,8 @@ It uses no real password, no Claude token (arm 8 is not released) and no mailbox
 | 4 | A Background Task Management record for the daemon's label, and a notification to `german` | Harmless, unmeasured. `status` names the record and exits 1 while it is there. In sitting 1 it was gone after `cleanup` |
 | 5 | Only if `dynamic` held in arm 2: a dynamic search list for the throwaway user | `cleanup` does not touch it and `status` does not check it. Where it lives, whether a reboot clears it and whether it reaches anything outside the throwaway user are unmeasured |
 
+**Sitting 2, 2026-11-24, stopped after arm 3, again on a probe defect.** Arms 1 to 3 ran; no half of arm 3 read the canary, the stop rule held arms 4, 6 and 7, nothing was rebooted, and `cleanup` left nothing. The records show why: in every reading job `list-keychains -d user` held the probe keychain, while plain `list-keychains`, the effective list a read goes through, held only the System keychain twice. The guard compared the first list, so arm 2's `on the search list (user)` was wrong and every read since went past a keychain it could not reach. L11 is still unmeasured. Since then the job judges the effective list, `show.py` and `check.py` judge it once more from the record, and every reading job also reads **by path** (`read_at`): it names the keychain in the query itself, so it needs no search list at all. The path read keeps the Security framework's own status code instead of turning not-found into `none`.
+
 Keep `auth test` output out of the report, the PR, the ticket and any agent session (#82).
 
 **Sitting 1, 2026-11-03, stopped after arm 3 (#97).** Arm 2 said `none` where the sheet expected locked. Every job's search list held only the System keychain, although the throwaway user's plist on disk named the probe keychain: a list set in one job does not reach the next, and keyring 25.7.0 ignores a keychain path. So no read could reach the canary, and the stop rule of arm 3 fired for the probe's reason, not the Mac's. Since then every reading job puts the keychain on its own search list first and refuses to read if it is not there. What sitting 1 did measure: a job that drops from root to the user can unlock and lock a dedicated keychain by path.
@@ -36,7 +38,7 @@ Keep `auth test` output out of the report, the PR, the ticket and any agent sess
 
 ## Before you start
 
-Obi copies the script over from the laptop, from the head James read, so the mode survives, and compares the sha256 sums on both sides (four at 90aff49; `check.py` came later and runs on the laptop, not here):
+Obi copies the script over from the laptop, from the head James read, so the mode survives, and compares the sha256 sums on both sides (four files; `check.py` runs on the laptop, not here). Sitting 1 and 2 used 90aff49; sitting 3 uses the head James reads after the sitting 2 fix:
 
 ```bash
 git archive <head> scripts/keychain_probe | ssh m1 'mkdir ~/keychain-probe && tar -xf - --strip-components=2 -C ~/keychain-probe && shasum -a 256 ~/keychain-probe/*'
@@ -63,10 +65,10 @@ Run the steps top to bottom. Each prints one line per arm. Paste those lines to 
 |---|------|---------|----------|
 | 1 | Set up, about 3 minutes | `sudo ./probe.sh setup` | Ends with `done. Next: arm1` |
 | 2 | Arm 1: never logged in | `sudo ./probe.sh arm1` | `no canary`: no keychain at all |
-| 3 | Arm 2: a keychain, locked. It first finds the search list domain that holds: `user`, else `dynamic`. **Stop rule below** | `sudo ./probe.sh arm2` | `on the search list (user)` or, after a `NOT ON THE SEARCH LIST (user)`, `(dynamic)`; then `search list domain that held:`; then `no canary` twice. Which outcome and OSStatus a locked item gives in such a job is unmeasured: `none` here is no longer a probe defect, because the list was checked, but tell Obi what it says |
-| 4 | Arm 3: the job unlocks it, in three halves. **Stop rule below** | `sudo ./probe.sh arm3` | `CANARY READ` in at least one of `arm3a`, `arm3b`, `arm3c`, then `partition that read:` |
+| 3 | Arm 2: a keychain, locked. It first looks for a search list domain that reaches the job's effective list: `user`, else `dynamic`. Sitting 2 says probably neither, and that no longer stops the run | `sudo ./probe.sh arm2` | Either `on the search list (user)` or `(dynamic)`, or two `NOT ON THE SEARCH LIST` lines and `the path route reads alone`; then `search list domain that held:` (a domain or `none`); then two lines with `no canary` on every route. The path route's OSStatus for a locked keychain is unmeasured: tell Obi what it says |
+| 4 | Arm 3: the job unlocks it, in three halves, and reads on both routes. **Stop rule below** | `sudo ./probe.sh arm3` | `CANARY READ` on `list:` or `path:` in at least one of `arm3a`, `arm3b`, `arm3c`, then `route and partition that read:`, for example `path cdhash` |
 | 5 | Arm 6: no trust entry, other interpreter | `sudo ./probe.sh arm6` | `no canary` twice |
-| 6 | Arm 7: red control, wrong service | `sudo ./probe.sh arm7` | `no canary`, outcome `none` |
+| 6 | Arm 7: red control, wrong service | `sudo ./probe.sh arm7` | `no canary`: on the list route outcome `none`, on the path route OSStatus `-25300` (not found) |
 | 7 | Arm 4, before the reboot | `sudo ./probe.sh arm4-install` | `installed for the next boot` |
 | 8 | Backup check, then reboot | `launchctl print gui/501/<label> \| grep 'state ='`, then `sudo shutdown -r now` | `not running`. Back in about 2 minutes |
 | 9 | Arm 4: the job at boot | `sudo ./probe.sh arm4-read` | `CANARY READ`. The console user shows who won the race against auto-login |
@@ -81,7 +83,7 @@ Run the steps top to bottom. Each prints one line per arm. Paste those lines to 
 | 18 | After Obi has the report | `sudo rm /Users/Shared/keychain-probe-report.jsonl`, then `sudo ./probe.sh status`, then `cd ~ && rm -r keychain-probe` | The closing line of `status`. A remaining background task record is named instead, see "What stays" |
 | 19 | In `german`'s own Terminal, no `sudo`. It only looks and prints no value | `security find-generic-password -s mailbox-cleanup-probe`, then `echo $?` | `44`: no canary in his keychain. Anything else: tell Obi, and delete nothing |
 
-**Stop rules, all enforced by the script.** If neither domain puts the keychain on the job's search list in arm 2, every later reading arm refuses to run. If any reading job finds the keychain missing from its own list, the run stops there instead of reporting `no canary`. If no half of arm 3 reads the canary, arms 4, 6 and 7 refuse to run, because they mean something only with the partition arm 3 proved. A `prepare` that fails stops the run at once. In every case do not reboot. Tell Obi, then run `cleanup`.
+**Stop rules, all enforced by the script.** If no domain reaches the effective list in arm 2, the list route is out and every later job reads by path only; that is not a stop. If a domain did reach it, every later reading job sets it and must reach the keychain through the effective list, or the run stops there instead of reporting `no canary`. If no half of arm 3 reads the canary on either route, arms 4, 6 and 7 refuse to run, because they mean something only with the route and partition arm 3 proved. A `prepare` that fails stops the run at once. In every case do not reboot. Tell Obi, then run `cleanup`.
 
 If any other step stops with an error, do not retry it. `sudo ./probe.sh cleanup` removes what the steps created, also after a failed user deletion, and an interrupted sitting does no harm: arm 4's job would run once at the next boot and read a canary. **If you stop during step 12 and logged `german` out, log him back in before 02:00,** or the night's backup does not run.
 
@@ -89,12 +91,13 @@ If any other step stops with an error, do not retry it. `sudo ./probe.sh cleanup
 
 | # | Result | Decision |
 |---|--------|----------|
-| 1 | Arms 3, 4 and 4b read the canary | The fallback of L11 works: a dedicated keychain, unlocked by the launcher's root part. L11 gets this route, and the launcher can be specified. The partition that reaches production is the one that read here, not the probe's list |
+| 1 | Arms 3, 4 and 4b read the canary on the **list** route | The fallback of L11 works: a dedicated keychain, unlocked by the launcher's root part, read by keyring as it is. L11 gets this route, and the launcher can be specified. The partition that reaches production is the one that read here, not the probe's list |
+| 1b | Arms 3, 4 and 4b read the canary on the **path** route only | A dedicated keychain works, but only when the reader names it: the host's read path changes from keyring to a query by path (`read_at`'s shape). That is a design change for James and MASCHIN, not decided by this sitting |
 | 2 | Half 3c is the one that read | The same, and every interpreter bump changes the partition, so it joins the T6 bump procedure |
 | 3 | Arm 4 reads and arm 4b does not, or the other way round | The login state matters after all. Obi reads the facts of both before anything else |
-| 4 | No half of arm 3 reads, with the keychain on the job's list | No route exists yet. MASCHIN ruled out a credential file, so this goes back to him and James |
-| 4b | Neither domain puts the keychain on the job's list (arm 2 stops) | The launcher cannot hand the host a dedicated keychain through the search list. Next route: the host queries that keychain itself, a change of its read path, for James and MASCHIN |
-| 5 | Arm 7 reads the canary, or says anything but missing | The probe cannot tell missing from locked, so no arm counts. Stop and tell Obi |
+| 4 | No half of arm 3 reads on either route | No route exists yet. MASCHIN ruled out a credential file, so this goes back to him and James, with the path route's OSStatus per half |
+| 4b | Neither domain reaches the job's effective list (arm 2 says `none`) | The launcher cannot hand the host a dedicated keychain through the search list. The sitting goes on by path, and its result is row 1b or row 4 |
+| 5 | Arm 7 reads the canary, or says anything but missing on a route | The probe cannot tell missing from locked on that route, so no arm counts on it. Stop and tell Obi |
 | 6 | Step 15 does not end with exit 0 | The backup does not survive a reboot. That is a finding for MASCHIN tonight, independent of the probe, and the next night's run would fail too |
 
 **Three things this cannot show.**
