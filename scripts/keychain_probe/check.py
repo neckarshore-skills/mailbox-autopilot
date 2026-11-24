@@ -41,8 +41,10 @@ def _key(r: dict) -> str:
     return f"{r.get('arm')}/{r.get('mode')}"
 
 
-# The path route keeps the Security framework's own status (job.read_at).
-PATH_CLASS = {-25300: MISSING, -25308: LOCKED}
+# The path route keeps the Security framework's own status (job.read_at). A locked keychain
+# with prompts off answered -25293 on the macOS CI job (PR #114), so it counts as locked;
+# the same code can also mean a refused partition, which is why arm 3 records every half.
+PATH_CLASS = {-25300: MISSING, -25308: LOCKED, -25293: LOCKED}
 
 
 def _list_class(read: dict) -> str:

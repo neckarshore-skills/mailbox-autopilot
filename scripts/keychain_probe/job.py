@@ -199,7 +199,7 @@ def read_at(path: str, service: str) -> dict:
 
     # No prompt: measured on the macOS CI job, a path read of a locked keychain in a user
     # session waits for a dialog nobody answers. With interaction off it answers with a
-    # status (errSecInteractionNotAllowed) instead, which is what a job without a session
+    # status instead (-25293 on the CI job, not the -25308 expected), which is what a job without a session
     # needs and what the record must show. Process-wide, so both_reads runs it last.
     no_ui = api._sec.SecKeychainSetUserInteractionAllowed
     no_ui.restype = api.OS_status

@@ -117,8 +117,9 @@ def test_the_path_route_on_a_locked_keychain_does_not_read(keychain):
     _security(f"lock-keychain {keychain}")
     read = _read(keychain)
     print("PATH ROUTE, locked:", json.dumps(read))
-    # Without prompts off this waited for a dialog until the timeout (first green run).
-    assert read == {"outcome": "status", "osstatus": -25308, "value_equals_canary": False}
+    # Without prompts off this waited for a dialog until the timeout (first green run). With
+    # them off the framework answered errSecAuthFailed, -25293, not the -25308 expected.
+    assert read == {"outcome": "status", "osstatus": -25293, "value_equals_canary": False}
 
 
 def test_the_path_route_names_a_keychain_that_is_not_there(tmp_path):
