@@ -262,9 +262,30 @@ def test_rotate_moves_a_filled_stderr_file_and_leaves_an_empty_one(tmp_path):
     dest = tmp_path / "stderr"
     moved = retention.rotate_stderr([full, empty, tmp_path / "absent.stderr"], dest, 1764000000.0)
     assert moved == ["launcher.stderr-20251124T160000Z"]
-    assert not full.exists() and empty.exists()
+    assert empty.exists()
     assert (dest / moved[0]).read_text() == "uv refused\n"
     assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+
+
+def test_rotate_leaves_an_empty_owner_only_file_where_launchd_appends(tmp_path):
+    """C6: launchd creates a missing StandardErrorPath file 0644 whatever the Umask key
+    says, and appends to an existing one without touching its mode (both measured
+    2026-11-25 on macOS 27.2.1, gui domain, with and without Umask 63). So after a move,
+    and for a file that is absent, rotation leaves an empty 0600 file in the path."""
+    full, absent = tmp_path / "launcher.stderr", tmp_path / "retention.stderr"
+    full.write_text("x\n")
+    retention.rotate_stderr([full, absent], tmp_path / "stderr", time.time())
+    for path in (full, absent):
+        assert path.read_text() == ""
+        assert stat.S_IMODE(path.lstat().st_mode) == 0o600
+
+
+def test_install_creates_the_stderr_files_owner_only_before_launchd_does():
+    text = (LAUNCHER / "install.sh").read_text()
+    names = sorted(p.name for p in retention.STDERR_FILES)
+    assert f"for f in {' '.join(names)}; do" in text
+    assert 'install -o root -g wheel -m 600 /dev/null "$BASE/$f"' in text
+    assert 'chmod 600 "$BASE/$f"' in text
 
 
 def test_rotate_leaves_a_symlink_alone(tmp_path):
@@ -315,9 +336,9 @@ def test_retention_and_the_gate_name_the_same_bot_user():
 
 @pytest.mark.parametrize("which", ["launcher", "retention"])
 def test_both_daemons_run_with_an_owner_only_umask(which):
-    """Umask 0o077 (decimal 63, as plist integers are written). launchd creates the
-    StandardErrorPath file before the job starts, and claude's stderr lands in it, so
-    L5's owner-only rule needs the mode set by launchd. Whether launchd applies the key
-    to the file it creates is measured in the 5b run on the M1, not here."""
+    """Umask 0o077 (decimal 63, as plist integers are written), for the files a job
+    creates. Measured 2026-11-25 (macOS 27.2.1, gui domain): a file the job touched came
+    out 0600 with the key and 0644 without; the StandardErrorPath file launchd created
+    came out 0644 either way, which the two tests below cover. System domain: 5b run."""
     p = getattr(plists, which)()
     assert p["Umask"] == 0o077 == 63

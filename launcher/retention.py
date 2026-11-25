@@ -63,7 +63,13 @@ def prune_dir(directory: Path, days: int, now: float) -> list[str]:
 def rotate_stderr(paths, dest: Path, now: float) -> list[str]:
     """Move each filled stderr file into `dest` under a dated name. launchd opens the path
     afresh each time it starts the job, and this job runs outside the run hours, so the
-    next run writes a new file. An empty file stays; a symlink is never touched."""
+    next run writes to what is in the path then. An empty file stays; a symlink is never
+    touched.
+
+    C6: launchd creates a missing StandardErrorPath file 0644, whatever the plist's Umask
+    says, and appends to an existing one without changing its mode (measured 2026-11-25,
+    macOS 27.2.1, gui domain). So a moved or absent file is replaced at once by an empty
+    0600 one, and launchd appends to that."""
     dest.mkdir(mode=0o700, exist_ok=True)
     stamp = datetime.fromtimestamp(now, UTC).strftime("%Y%m%dT%H%M%SZ")
     moved = []
@@ -71,13 +77,25 @@ def rotate_stderr(paths, dest: Path, now: float) -> list[str]:
         try:
             st = path.lstat()
         except FileNotFoundError:
+            _owner_only_empty(path)
             continue
         if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
             continue
         name = f"{path.name}-{stamp}"
         os.replace(path, dest / name)
         moved.append(name)
+        _owner_only_empty(path)
     return moved
+
+
+def _owner_only_empty(path: Path) -> None:
+    """An empty 0600 file in `path`; never follows or replaces what is already there."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return
+    os.fchmod(fd, 0o600)  # the mode argument is masked by the umask; this is not
+    os.close(fd)
 
 
 def _line_time(line: bytes) -> datetime | None:

@@ -19,8 +19,10 @@ UV_HOME = "/usr/local/mailbox-autopilot/uv"
 FIRST_HOUR, LAST_HOUR = 7, 20  # L9 (D10): hourly from 07:00 to 20:00
 RETENTION_AT = {"Hour": 5, "Minute": 30}  # outside the run hours and the night backup window
 EXIT_TIMEOUT_S = 20  # SIGTERM to SIGKILL; gate.py kills the session on SIGTERM
-# C6 (James, #102): launchd creates launcher.stderr and retention.stderr, and claude's own
-# stderr goes there. 0o077 keeps every file a job creates owner-only (L5). What the bot
+# C6 (James, #102): 0o077 keeps every file a job creates owner-only (L5). It does NOT
+# cover launcher.stderr and retention.stderr: launchd creates a missing StandardErrorPath
+# file 0644 whatever this key says (measured 2026-11-25, macOS 27.2.1, gui domain), so
+# install.sh and retention.py keep an empty 0600 file in both paths. What the bot
 # reads (claude, host.json, settings.json, the app venv, uv's Python) install.sh puts in
 # place with explicit modes; only a file root creates at run time inside uv's Python tree
 # (a __pycache__) would come out root-only, and Python falls back to the source then.

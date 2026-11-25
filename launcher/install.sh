@@ -104,6 +104,15 @@ install_launcher() { # owner
     "$SRC/prompt.txt" "$SRC/settings.json" "$SRC/host.json" "$BASE/launcher/"
   say "run files and digests go to $1 only (L5)"
   install -d -o "$1" -g staff -m 700 "$BASE/runs" "$BASE/digests"
+  # C6: launchd creates a missing StandardErrorPath file 0644 whatever Umask says, and
+  # appends to an existing one without changing its mode (measured 2026-11-25).
+  say "stderr files root-only before launchd opens them (L13, L5)"
+  for f in launcher.stderr retention.stderr; do
+    [ ! -L "$BASE/$f" ] || die "$BASE/$f is a symlink"
+    [ -e "$BASE/$f" ] || install -o root -g wheel -m 600 /dev/null "$BASE/$f"
+    chown root:wheel "$BASE/$f"
+    chmod 600 "$BASE/$f"
+  done
 }
 
 install_user() {
