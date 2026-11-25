@@ -285,3 +285,26 @@ def test_rotated_stderr_is_pruned_at_14_days(tmp_path):
     now = time.time()
     os.utime(old, (now - 15 * 86400, now - 15 * 86400))
     assert retention.prune_dir(dest, retention.RUN_DAYS, now) == ["launcher.stderr-old"]
+
+
+# ---- C3 (James, #101): the night gap is 11 hours, so retention kills leftovers too ----
+
+
+def test_retention_kills_the_bot_users_leftovers_first(tmp_path, monkeypatch, capsys):
+    seen = []
+    for name in ("RUNS_DIR", "DIGESTS_DIR", "HOST_AUDIT", "STDERR_DIR"):
+        monkeypatch.setattr(retention, name, tmp_path / name)
+    monkeypatch.setattr(retention, "STDERR_FILES", ())
+    monkeypatch.setattr(
+        retention.subprocess,
+        "run",
+        lambda argv, **k: seen.append(argv) or subprocess.CompletedProcess(argv, 0),
+    )
+    assert retention.main() == 0
+    assert seen == [["/usr/bin/pkill", "-KILL", "-U", "mailbox-autopilot-bot"]]
+    report = json.loads(capsys.readouterr().err)["retention"]
+    assert report["leftovers_killed"] is True
+
+
+def test_retention_and_the_gate_name_the_same_bot_user():
+    assert retention.BOT_USER == gate.BOT_USER

@@ -5,6 +5,7 @@
 - host-audit.log: 90 days, by the `timestamp` of each line
 - launcher.stderr and retention.stderr (L13): moved aside once a day when not empty, and
   the moved files kept 14 days, like the run files, since claude's own stderr lands there
+- first of all, whatever the bot user still runs is killed (C3), like gate.py does
 
 The audit log carries the system append-only flag, which only root can clear, and only at
 securelevel 0. It is pruned by writing the kept lines to a new file beside it, giving that
@@ -22,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -33,6 +35,7 @@ DIGESTS_DIR = BASE / "digests"
 HOST_AUDIT = BASE / "host-audit.log"
 STDERR_FILES = (BASE / "launcher.stderr", BASE / "retention.stderr")  # plists.py, L13
 STDERR_DIR = BASE / "stderr"
+BOT_USER = "mailbox-autopilot-bot"  # gate.py's; a test holds the two equal
 
 RUN_DAYS = 14
 DIGEST_DAYS = 30
@@ -127,9 +130,17 @@ def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPE
     return dropped
 
 
+def kill_leftovers(user: str = BOT_USER) -> int:
+    """C3 (James, #101): gate.py kills what the bot user still runs at the start of each
+    run, but the last run is at 20:00 and the next at 07:00, so an orphan of the evening
+    run would live eleven hours. This job at 05:30 kills it too."""
+    return subprocess.run(["/usr/bin/pkill", "-KILL", "-U", user], check=False).returncode
+
+
 def main() -> int:
     now = time.time()
     report = {
+        "leftovers_killed": kill_leftovers() == 0,
         "runs": prune_dir(RUNS_DIR, RUN_DAYS, now),
         "digests": prune_dir(DIGESTS_DIR, DIGEST_DAYS, now),
         "audit_lines_dropped": prune_audit(HOST_AUDIT, AUDIT_DAYS, now),
