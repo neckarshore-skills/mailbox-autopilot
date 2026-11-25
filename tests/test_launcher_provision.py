@@ -308,3 +308,16 @@ def test_retention_kills_the_bot_users_leftovers_first(tmp_path, monkeypatch, ca
 
 def test_retention_and_the_gate_name_the_same_bot_user():
     assert retention.BOT_USER == gate.BOT_USER
+
+
+# ---- C6 (James, #102): launchd creates the stderr files, so the umask is set there ----
+
+
+@pytest.mark.parametrize("which", ["launcher", "retention"])
+def test_both_daemons_run_with_an_owner_only_umask(which):
+    """Umask 0o077 (decimal 63, as plist integers are written). launchd creates the
+    StandardErrorPath file before the job starts, and claude's stderr lands in it, so
+    L5's owner-only rule needs the mode set by launchd. Whether launchd applies the key
+    to the file it creates is measured in the 5b run on the M1, not here."""
+    p = getattr(plists, which)()
+    assert p["Umask"] == 0o077 == 63
