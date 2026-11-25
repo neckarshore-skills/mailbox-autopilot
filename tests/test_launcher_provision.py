@@ -123,12 +123,42 @@ def test_the_installed_paths_are_the_launchers_paths():
 # ---- install.sh ----
 
 
-def test_install_refuses_anywhere_but_the_target_mac_as_root():
-    proc = subprocess.run(
-        ["bash", str(LAUNCHER / "install.sh"), "status"], capture_output=True, text=True
-    )
+def test_install_refuses_anywhere_but_the_target_mac_as_root(tmp_path):
+    """CodeRabbit 4507077158 on #102: run as root on the M1 itself, `status` passes the
+    guard, so the test pins HOST_WANTED to a name no machine has and holds on any host."""
+    script = (LAUNCHER / "install.sh").read_text()
+    assert 'HOST_WANTED="M1mini"' in script
+    copy = tmp_path / "install.sh"
+    copy.write_text(script.replace('HOST_WANTED="M1mini"', 'HOST_WANTED="no-such-host-x9"'))
+    proc = subprocess.run(["bash", str(copy), "status"], capture_output=True, text=True)
     assert proc.returncode == 2
-    assert re.search(r"target Mac only|runs on M1mini only|run it with sudo", proc.stderr)
+    assert re.search(r"target Mac only|runs on no-such-host-x9 only", proc.stderr)
+
+
+def _function(name: str) -> str:
+    text = (LAUNCHER / "install.sh").read_text()
+    start = text.index(f"{name}() {{")
+    return text[start : text.index("\n}\n", start)]
+
+
+def test_a_rerun_completes_an_account_an_interrupted_install_left_half_done():
+    """CodeRabbit 4507077128 on #102: install_user returned as soon as the account existed,
+    so group, membership and the hidden flag were never set after an install interrupted
+    behind sysadminctl. Each is now checked on every run. Not run here (dscl, root)."""
+    body = _function("install_user")
+    assert "return" not in body
+    assert body.index("sysadminctl -addUser") < body.index("IsHidden 1")
+    assert "dseditgroup -o checkmember" in body
+    assert 'dseditgroup -o read "$BOT_GROUP"' in body
+
+
+def test_an_existing_audit_log_is_checked_not_trusted():
+    """CodeRabbit 4507077134 on #102: a log left without sappend by a failed chflags was
+    reported as fine. Not run here (chflags sappend needs root)."""
+    body = _function("install_audit_log")
+    for check in ('[ ! -L "$log" ]', 'stat -f %Su "$log"', 'stat -f %Lp "$log"', "sappnd"):
+        assert check in body
+    assert body.count("chflags sappend") == 2
 
 
 def test_install_neither_loads_daemons_nor_edits_pf_conf():

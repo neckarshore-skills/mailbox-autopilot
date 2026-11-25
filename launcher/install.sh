@@ -116,32 +116,47 @@ install_launcher() { # owner
 }
 
 install_user() {
+  # Every step is checked on every run (CodeRabbit 4507077128): an install interrupted
+  # behind sysadminctl left an account without group, membership or hidden flag.
+  dseditgroup -o read "$BOT_GROUP" >/dev/null 2>&1 ||
+    dseditgroup -o create -r "mailbox-autopilot bot" "$BOT_GROUP"
   if id "$BOT_USER" >/dev/null 2>&1; then
-    say "user $BOT_USER exists"
-    return
+    say "user $BOT_USER exists; group, membership, hidden flag and home checked again"
+  else
+    say "the bot user: not an admin, never logged in"
+    # The password handling follows L11, which the keychain probe decides. Until then
+    # sysadminctl prompts for it ('-'), so it never stands in a process list: type a long
+    # throwaway and keep it nowhere. No login shell, hidden from the login window.
+    say "sysadminctl asks for the bot's password now: type a long throwaway, keep it nowhere"
+    sysadminctl -addUser "$BOT_USER" -fullName "Mailbox Autopilot Bot" -shell /usr/bin/false \
+      -password -
   fi
-  say "the bot group and user: not an admin, never logged in"
-  dseditgroup -o create -r "mailbox-autopilot bot" "$BOT_GROUP"
-  # The password handling follows L11, which the keychain probe decides. Until then
-  # sysadminctl prompts for it ('-'), so it never stands in a process list: type a long
-  # throwaway and keep it nowhere. No login shell, hidden from the login window.
-  say "sysadminctl asks for the bot's password now: type a long throwaway, keep it nowhere"
-  sysadminctl -addUser "$BOT_USER" -fullName "Mailbox Autopilot Bot" -shell /usr/bin/false \
-    -password -
   dscl . -create "/Users/$BOT_USER" IsHidden 1
-  dseditgroup -o edit -a "$BOT_USER" -t user "$BOT_GROUP"
-  createhomedir -c -u "$BOT_USER" >/dev/null
+  dseditgroup -o checkmember -m "$BOT_USER" "$BOT_GROUP" >/dev/null 2>&1 ||
+    dseditgroup -o edit -a "$BOT_USER" -t user "$BOT_GROUP"
+  [ -d "/Users/$BOT_USER" ] || createhomedir -c -u "$BOT_USER" >/dev/null
 }
 
 install_audit_log() {
+  # An existing log is checked, not trusted (CodeRabbit 4507077134): a chflags that failed
+  # on an earlier run left it without sappend, and the host then refuses every session.
   local log="$BASE/host-audit.log"
-  if [ -e "$log" ]; then
-    say "host-audit.log exists; left as it is"
-    return
+  [ ! -L "$log" ] || die "$log is a symlink"
+  if [ ! -e "$log" ]; then
+    say "host-audit.log: owned by the bot, system append-only (section 5.5)"
+    install -o "$BOT_USER" -g "$BOT_GROUP" -m 600 /dev/null "$log"
+    chflags sappend "$log"
   fi
-  say "host-audit.log: owned by the bot, system append-only (section 5.5)"
-  install -o "$BOT_USER" -g "$BOT_GROUP" -m 600 /dev/null "$log"
-  chflags sappend "$log"
+  [ -f "$log" ] || die "$log is not a regular file"
+  [ "$(stat -f %Su "$log")" = "$BOT_USER" ] || die "$log is not owned by $BOT_USER"
+  [ "$(stat -f %Lp "$log")" = "600" ] || die "$log is not mode 600"
+  case ",$(stat -f %Sf "$log")," in
+    *,sappnd,*) say "host-audit.log: owner, mode and sappend checked" ;;
+    *)
+      say "host-audit.log had no sappend; set again"
+      chflags sappend "$log"
+      ;;
+  esac
 }
 
 install_daemons() {
