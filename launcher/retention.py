@@ -133,7 +133,7 @@ def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPE
         st = path.stat()
         fd = os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
-            os.write(fd, b"".join(kept))
+            _write_all(fd, b"".join(kept))
             if os.geteuid() == 0:
                 os.fchown(fd, st.st_uid, st.st_gid)
             os.fchmod(fd, stat.S_IMODE(st.st_mode))
@@ -142,7 +142,13 @@ def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPE
             os.close(fd)
         if flag is not None:
             os.chflags(path, st.st_flags & ~flag)
-        os.replace(fresh, path)
+        try:
+            os.replace(fresh, path)
+        except OSError:
+            # C7: the live log keeps its lines; give it its flag back before reporting.
+            if flag is not None:
+                os.chflags(path, st.st_flags | flag)
+            raise
     if flag is not None:
         os.chflags(path, path.stat().st_flags | flag)
     return dropped
@@ -153,6 +159,13 @@ def kill_leftovers(user: str = BOT_USER) -> int:
     run, but the last run is at 20:00 and the next at 07:00, so an orphan of the evening
     run would live eleven hours. This job at 05:30 kills it too."""
     return subprocess.run(["/usr/bin/pkill", "-KILL", "-U", user], check=False).returncode
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """C7: os.write may write less than it was given; a short write would drop records."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
 
 
 def main() -> int:

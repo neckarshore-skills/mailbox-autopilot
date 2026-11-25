@@ -342,3 +342,33 @@ def test_both_daemons_run_with_an_owner_only_umask(which):
     came out 0644 either way, which the two tests below cover. System domain: 5b run."""
     p = getattr(plists, which)()
     assert p["Umask"] == 0o077 == 63
+
+
+# ---- C7 (James, #102; CodeRabbit 4507077146, 4507077153): the audit log is a control ----
+
+
+def test_a_short_write_does_not_drop_audit_records(tmp_path, monkeypatch):
+    now = time.time()
+    log = tmp_path / "host-audit.log"
+    kept = "".join(_line(1, now, n=i) for i in range(20))
+    log.write_text(_line(91, now, n=-1) + kept)
+    real_write = os.write
+    monkeypatch.setattr(retention.os, "write", lambda fd, data: real_write(fd, data[:7]))
+    assert retention.prune_audit(log, 90, now, flag=None) == 1
+    assert log.read_text() == kept
+
+
+@darwin
+def test_a_failed_replace_puts_the_flag_back_and_says_so(flagged_log, monkeypatch):
+    now = time.time()
+    flagged_log.write_text(_line(91, now, n=1) + _line(1, now, n=2))
+    os.chflags(flagged_log, stat.UF_APPEND)
+
+    def refuse(src, dst):
+        raise OSError("replace refused")
+
+    monkeypatch.setattr(retention.os, "replace", refuse)
+    with pytest.raises(OSError, match="replace refused"):
+        retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND)
+    assert flagged_log.stat().st_flags & stat.UF_APPEND
+    assert len(flagged_log.read_text().splitlines()) == 2  # nothing lost
