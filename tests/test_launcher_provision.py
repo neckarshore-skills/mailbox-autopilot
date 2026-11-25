@@ -372,3 +372,18 @@ def test_a_failed_replace_puts_the_flag_back_and_says_so(flagged_log, monkeypatc
         retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND)
     assert flagged_log.stat().st_flags & stat.UF_APPEND
     assert len(flagged_log.read_text().splitlines()) == 2  # nothing lost
+
+
+# ---- CodeRabbit 4507077140 on #102: a timestamp without a time zone ----
+
+
+def test_a_timestamp_without_a_zone_is_kept_and_retention_goes_on(tmp_path):
+    """A naive time compared with the aware cutoff raised TypeError outside the parse
+    guard and stopped the whole retention run. A line whose time has no zone is kept,
+    like any line whose time cannot be read: losing a record is worse."""
+    now = time.time()
+    log = tmp_path / "host-audit.log"
+    naive = json.dumps({"timestamp": "2020-01-01T00:00:00", "n": 0}) + "\n"
+    log.write_text(naive + _line(91, now, n=1) + _line(1, now, n=2))
+    assert retention.prune_audit(log, 90, now, flag=None) == 1
+    assert [json.loads(x)["n"] for x in log.read_text().splitlines()] == [0, 2]

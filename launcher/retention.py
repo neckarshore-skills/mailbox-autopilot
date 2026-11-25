@@ -99,11 +99,14 @@ def _owner_only_empty(path: Path) -> None:
 
 
 def _line_time(line: bytes) -> datetime | None:
+    """The line's time, or None when it cannot be read; a time without a zone cannot be
+    compared with the cutoff, so it counts as unreadable and the line is kept."""
     try:
         stamp = json.loads(line)["timestamp"]
-        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
+    return when if when.tzinfo is not None else None
 
 
 def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPEND) -> int:
