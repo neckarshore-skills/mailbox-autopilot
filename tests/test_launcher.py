@@ -493,6 +493,25 @@ def test_the_bot_settings_turn_auto_memory_off_and_deny_built_in_tools():
     assert "hooks" not in settings and "env" not in settings
 
 
+# C5 (James, #101): every built-in tool 2.1.317 offers without --tools "" (measured
+# 2026-11-25, launcher environment, stub server), plus the four names James listed, of
+# which Glob, Grep and Agent were not offered in that measurement.
+MEASURED_BUILTIN_TOOLS = {
+    "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
+    "ExitWorktree", "ListAgents", "Monitor", "NotebookEdit", "Read", "ReportFindings",
+    "ScheduleWakeup", "SendMessage", "Task", "TaskStop", "ToolSearch", "WebFetch",
+    "WebSearch", "Workflow", "Write",
+}  # fmt: skip
+JAMES_NAMED = {"Agent", "Glob", "Grep", "NotebookEdit"}
+
+
+def test_the_bot_settings_deny_every_measured_built_in_tool():
+    """Second layer only: --tools "" and the init gate already keep these out."""
+    deny = json.loads((LAUNCHER / "settings.json").read_text())["permissions"]["deny"]
+    assert set(deny) == MEASURED_BUILTIN_TOOLS | JAMES_NAMED
+    assert deny == sorted(deny)
+
+
 def test_the_bot_settings_shut_the_built_in_plugins_off_at_load():
     """C1 (James, #101): pinning `plugins` in init detects after the fact; these two keys
     stop the built-ins from loading. Measured on 2.1.317: both keys give `plugins: []`;

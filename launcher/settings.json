@@ -9,11 +9,29 @@
   },
   "permissions": {
     "deny": [
+      "Agent",
       "Bash",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
       "Edit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Glob",
+      "Grep",
+      "ListAgents",
+      "Monitor",
+      "NotebookEdit",
       "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "SendMessage",
+      "Task",
+      "TaskStop",
+      "ToolSearch",
       "WebFetch",
       "WebSearch",
+      "Workflow",
       "Write"
     ]
   }
