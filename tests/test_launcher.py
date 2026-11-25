@@ -233,6 +233,36 @@ def test_a_host_that_outlives_a_clean_session_is_killed(tmp_path):
     assert not _survived_later(tmp_path)
 
 
+class _Unreaped:
+    """A child that SIGKILL does not reap in time (uninterruptible sleep, for one)."""
+
+    pid = 999999
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            pytest.fail("an unbounded wait")
+        raise subprocess.TimeoutExpired("claude", timeout)
+
+
+def test_the_wait_after_sigkill_is_bounded(monkeypatch):
+    """CodeRabbit 4500759967 on #101: the wait after the final SIGKILL had no bound."""
+    monkeypatch.setattr(gate.os, "killpg", lambda pid, sig: None)
+    assert gate._kill(_Unreaped()) is False
+
+
+def test_a_child_that_is_not_reaped_is_noted(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "_kill", lambda proc: (proc.wait(), False)[1])
+    rc, lines, _ = _run(tmp_path, [GOOD_INIT, {"type": "result", "subtype": "success"}])
+    assert rc == gate.EXIT_OK
+    assert lines[-1] == {"launcher": {"cleanup": "child not reaped after SIGKILL"}}
+
+
 class _BrokenRunFile:
     """A run file that takes the init line and then fails, like a full disk."""
 

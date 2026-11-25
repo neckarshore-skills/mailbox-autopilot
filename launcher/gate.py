@@ -73,6 +73,7 @@ MANAGED_PINNED: frozenset[str] = frozenset()  # sha256 of an accepted managed fi
 MAX_TURNS = 12  # L12
 WALL_CLOCK_S = 300  # L12: the whole session
 INIT_TIMEOUT_S = 60  # the first event must be system/init
+KILL_WAIT_S = 10  # after SIGKILL, before the launcher gives up waiting for the child
 
 # exit codes of the launcher (the PR states them)
 EXIT_OK = 0
@@ -323,14 +324,21 @@ def note(out, **fields) -> None:
     out.flush()
 
 
-def _kill(proc: subprocess.Popen) -> None:
+def _kill(proc: subprocess.Popen) -> bool:
+    """SIGKILL to the child's group, then a bounded wait (CodeRabbit 4500759967): a child
+    stuck in an uninterruptible sleep must not hold the launcher. False when it was not
+    reaped in time; the next run's pkill and the 05:30 retention job try again."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass  # macOS answers EPERM, not ESRCH, for a group with no live member left
     if proc.poll() is None:
         proc.kill()
-    proc.wait()
+    try:
+        proc.wait(timeout=KILL_WAIT_S)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
 
 
 def supervise(
@@ -369,7 +377,8 @@ def supervise(
         try:
             return _watch(proc, prompt, out, wall_clock_s, init_timeout_s)
         finally:
-            _kill(proc)
+            if not _kill(proc):
+                note(out, cleanup="child not reaped after SIGKILL")
     finally:
         signal.signal(signal.SIGTERM, previous)
 
