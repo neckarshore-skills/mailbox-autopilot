@@ -5,6 +5,7 @@ the literal argv (L1, L2, L12), the wall clock (L12), the uv check (L10), the ru
 (L5) and the refusing credential seam (L11). Root ownership, the privilege drop, the plist
 and 5a to 5c are measured on the target Mac only, and nothing here stands in for them."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -339,6 +340,18 @@ def test_the_uv_pin_is_the_ci_pin():
 # ---- L11 seam and L5 run file ----
 
 
+@pytest.fixture(autouse=True)
+def _no_managed_settings(tmp_path, monkeypatch):
+    """main() checks the managed-settings paths of the Mac it runs on; tests look at a
+    place that is empty unless a test puts something there."""
+    monkeypatch.setattr(gate, "MANAGED_DIR", tmp_path / "managed" / "ClaudeCode")
+    monkeypatch.setattr(
+        gate,
+        "MANAGED_PREFS",
+        (tmp_path / "prefs" / "device.plist", tmp_path / "prefs" / "bot" / "user.plist"),
+    )
+
+
 def _main_without_root(tmp_path, monkeypatch, version_reason=None):
     calls = []
     monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
@@ -602,4 +615,89 @@ def test_a_missing_digest_file_does_not_stop_the_session(tmp_path, monkeypatch):
     (run,) = (tmp_path / "runs").iterdir()
     assert json.loads(run.read_text().splitlines()[-1])["launcher"] == {
         "digest_failed": "FileNotFoundError"
+    }
+
+
+# ---- C2 (James, #101): managed settings outrank --settings, so their presence refuses ----
+
+
+def test_the_managed_paths_are_the_ones_2_1_317_reads():
+    """From `strings` on the pinned binary: the ClaudeCode directory (managed-settings.json,
+    managed-settings.d/, managed-mcp.json) and the managed preferences of the domain
+    com.anthropic.claudecode, device-level and per user."""
+    real = _load_gate()
+    assert real.MANAGED_DIR == Path("/Library/Application Support/ClaudeCode")
+    assert real.MANAGED_PREFS == (
+        Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"),
+        Path(f"/Library/Managed Preferences/{real.BOT_USER}/com.anthropic.claudecode.plist"),
+    )
+    assert real.MANAGED_PINNED == frozenset()
+
+
+def _managed(tmp_path):
+    d = tmp_path / "ClaudeCode"
+    prefs = (tmp_path / "device.plist", tmp_path / "user.plist")
+    return d, prefs
+
+
+def test_no_managed_settings_pass(tmp_path):
+    d, prefs = _managed(tmp_path)
+    assert gate.check_managed(d, prefs, frozenset()) is None
+    d.mkdir()
+    assert gate.check_managed(d, prefs, frozenset()) is None  # an empty directory
+
+
+@pytest.mark.parametrize(
+    "plant",
+    ["managed-settings.json", "managed-mcp.json", "anything-else.json"],
+)
+def test_a_managed_file_refuses_unless_its_hash_is_pinned(tmp_path, plant):
+    d, prefs = _managed(tmp_path)
+    d.mkdir()
+    (d / plant).write_text('{"hooks": {}}')
+    assert gate.check_managed(d, prefs, frozenset()) == f"managed settings present: {plant}"
+    digest = hashlib.sha256(b'{"hooks": {}}').hexdigest()
+    assert gate.check_managed(d, prefs, frozenset({digest})) is None
+
+
+def test_a_drop_in_directory_or_a_link_refuses(tmp_path):
+    d, prefs = _managed(tmp_path)
+    d.mkdir()
+    (d / "managed-settings.d").mkdir()
+    assert gate.check_managed(d, prefs, frozenset()) == (
+        "managed settings present: managed-settings.d"
+    )
+    (d / "managed-settings.d").rmdir()
+    (d / "managed-settings.json").symlink_to(tmp_path / "nowhere")  # dangling counts
+    assert gate.check_managed(d, prefs, frozenset()) == (
+        "managed settings present: managed-settings.json"
+    )
+
+
+def test_the_managed_directory_as_a_link_refuses(tmp_path):
+    d, prefs = _managed(tmp_path)
+    (tmp_path / "real").mkdir()
+    d.symlink_to(tmp_path / "real")
+    assert gate.check_managed(d, prefs, frozenset()) == "managed settings present: ClaudeCode"
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["device", "per-user"])
+def test_managed_preferences_refuse(tmp_path, which):
+    d, prefs = _managed(tmp_path)
+    prefs[which].write_bytes(b"plist")
+    assert gate.check_managed(d, prefs, frozenset()) == (
+        f"managed settings present: {prefs[which].name}"
+    )
+
+
+def test_managed_settings_stop_before_the_credential_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "credential_step", lambda env: pytest.fail("credential read"))
+    gate.MANAGED_DIR.mkdir(parents=True)
+    (gate.MANAGED_DIR / "managed-settings.json").write_text("{}")
+    rc, notes, calls = _main_without_root(tmp_path, monkeypatch)
+    assert rc == gate.EXIT_MANAGED
+    assert calls == ["kill", "version"]
+    assert notes[-1] == {
+        "refused": "managed",
+        "reason": "managed settings present: managed-settings.json",
     }

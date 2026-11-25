@@ -15,16 +15,18 @@ loaded by its path): counted from the run files, never from what the model wrote
 Not done here, by design:
 - The credential step (L11) is a seam that refuses, so this launcher cannot start a
   session until the keychain probe has an answer. See credential_step().
-- Root ownership, the plist, managed settings, pf and retention are slice 2.
+- Root ownership, the plist, pf and retention are slice 2 (install.sh, plists.py).
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -52,6 +54,19 @@ WORK_DIR = BASE / "launcher" / "empty"  # 5c: no CLAUDE.md, no .claude/
 BOT_USER = "mailbox-autopilot-bot"
 BOT_GROUP = "mailbox-autopilot-bot"
 BOT_HOME = Path("/Users/mailbox-autopilot-bot")
+# C2 (James, #101): managed settings outrank --settings, so a managed file would bring its
+# hooks into the bot's session. These are the places 2.1.317 reads on macOS (`strings` on
+# the pinned binary): the whole ClaudeCode directory (managed-settings.json, the drop-in
+# directory managed-settings.d/, managed-mcp.json) and the managed preferences of the
+# domain com.anthropic.claudecode. Anything present refuses, unless it is a regular file
+# whose sha256 is pinned below. Server-managed settings on the owner's account are not
+# visible from here (ungemessen, a console check).
+MANAGED_DIR = Path("/Library/Application Support/ClaudeCode")
+MANAGED_PREFS = (
+    Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"),
+    Path(f"/Library/Managed Preferences/{BOT_USER}/com.anthropic.claudecode.plist"),
+)
+MANAGED_PINNED: frozenset[str] = frozenset()  # sha256 of an accepted managed file
 MAX_TURNS = 12  # L12
 WALL_CLOCK_S = 300  # L12: the whole session
 INIT_TIMEOUT_S = 60  # the first event must be system/init
@@ -66,6 +81,7 @@ EXIT_CHILD = 14  # claude ended non-zero
 EXIT_TERMINATED = 15  # SIGTERM, from launchd or root; the session was killed first
 EXIT_VERSION = 16  # L4: the installed claude is not CLAUDE_VERSION
 EXIT_PROMPT = 17  # prompt.txt is absent or blank
+EXIT_MANAGED = 18  # C2: a managed-settings source is present and not pinned
 
 
 def build_env() -> dict[str, str]:
@@ -169,6 +185,52 @@ def check_init(event: object) -> str | None:
     if plugins:
         found = sorted(str(p.get("source") if isinstance(p, dict) else p) for p in plugins)
         return f"plugins loaded: {found}"
+    return None
+
+
+def _pinned_file(path: Path, pinned: frozenset[str]) -> bool:
+    """True only for a regular file, opened without following a link, whose sha256 is in
+    `pinned`. An empty pin set answers False without reading."""
+    if not pinned:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return False
+        return hashlib.sha256(f.read()).hexdigest() in pinned
+
+
+def _present(path: Path) -> bool:
+    try:
+        path.lstat()  # a dangling link is present
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def check_managed(
+    managed_dir: Path | None = None,
+    prefs: tuple[Path, ...] | None = None,
+    pinned: frozenset[str] | None = None,
+) -> str | None:
+    """C2: None when no managed-settings source is present, or every one present is a
+    pinned regular file. Otherwise the reason, naming the first entry found."""
+    managed_dir = MANAGED_DIR if managed_dir is None else managed_dir
+    prefs = MANAGED_PREFS if prefs is None else prefs
+    pinned = MANAGED_PINNED if pinned is None else pinned
+    for path in prefs:
+        if _present(path) and not _pinned_file(path, pinned):
+            return f"managed settings present: {path.name}"
+    if not _present(managed_dir):
+        return None
+    if managed_dir.is_symlink() or not managed_dir.is_dir():
+        return f"managed settings present: {managed_dir.name}"
+    for entry in sorted(managed_dir.iterdir()):
+        if not _pinned_file(entry, pinned):
+            return f"managed settings present: {entry.name}"
     return None
 
 
@@ -375,6 +437,9 @@ def main() -> int:
         if (reason := check_claude_version(CLAUDE, build_env())) is not None:
             note(out, refused="version", reason=reason)
             return EXIT_VERSION
+        if (reason := check_managed()) is not None:
+            note(out, refused="managed", reason=reason)
+            return EXIT_MANAGED
         day = yesterday()
         try:
             prompt = load_prompt(PROMPT_FILE, day)
