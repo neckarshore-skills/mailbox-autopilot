@@ -461,9 +461,21 @@ def test_launch_refuses_a_uv_of_another_version_with_one_line(tmp_path):
 
 
 def test_launch_refuses_when_uv_is_missing(tmp_path):
-    proc, _ = _launch(tmp_path, None)
+    proc, runs = _launch(tmp_path, None)
     assert proc.returncode == 20
     assert "no uv at" in proc.stderr
+    (run,) = runs.iterdir()
+    assert json.loads(run.read_text()) == {"launcher": {"refused": "uv", "reason": "missing"}}
+
+
+def test_the_refusal_line_carries_a_fixed_code_whatever_uv_prints(tmp_path):
+    """C4 (James, #101): what uv prints never reaches the run file's JSON. The detail goes
+    to stderr as plain text."""
+    proc, runs = _launch(tmp_path, 'uv 0.13.6"},"x":{"y":"\\')
+    assert proc.returncode == 20
+    (run,) = runs.iterdir()
+    assert json.loads(run.read_text()) == {"launcher": {"refused": "uv", "reason": "version"}}
+    assert "expected 0.13.5" in proc.stderr
 
 
 def test_launch_starts_the_gate_from_an_empty_environment(tmp_path):
