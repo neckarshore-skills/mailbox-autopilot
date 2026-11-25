@@ -47,6 +47,9 @@ MCP_CONFIG = BASE / "launcher" / "host.json"
 SETTINGS = BASE / "launcher" / "settings.json"  # the bot's own settings, not managed (PR)
 PROMPT_FILE = BASE / "launcher" / "prompt.txt"
 SINCE_TOKEN = "{since}"  # prompt.txt names the day to search from; the launcher fills it
+# The prompt goes to the child's stdin in one write before the deadlines are watched; a
+# prompt that fits the pipe buffer at once cannot block that write (CodeRabbit 4500759977).
+MAX_PROMPT_BYTES = 8192
 RUNS_DIR = BASE / "runs"  # L5: owner-only files, one per run
 DIGESTS_DIR = BASE / "digests"  # L5: one digest a day, owner-only
 DIGEST = Path(__file__).with_name("digest.py")
@@ -259,7 +262,10 @@ def load_prompt(path: Path, day: str) -> str:
         raise PromptUnavailable(f"{path.name}: {type(exc).__name__}") from None
     if not text.strip():
         raise PromptUnavailable(f"{path.name} is blank")
-    return text.replace(SINCE_TOKEN, day)
+    prompt = text.replace(SINCE_TOKEN, day)
+    if len(prompt.encode()) > MAX_PROMPT_BYTES:
+        raise PromptUnavailable(f"{path.name} is too long for one pipe write")
+    return prompt
 
 
 def _digest():

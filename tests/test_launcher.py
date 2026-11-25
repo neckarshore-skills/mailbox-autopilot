@@ -579,6 +579,22 @@ def test_a_missing_prompt_is_a_refusal_not_a_traceback(tmp_path, content):
         gate.load_prompt(path, "2026-11-23")
 
 
+def test_a_prompt_too_long_for_one_pipe_write_is_refused(tmp_path):
+    """CodeRabbit 4500759977 on #101: the prompt is written to the child's stdin before
+    the deadlines are watched. A prompt that fits the pipe buffer at once cannot block;
+    MAX_PROMPT_BYTES keeps it there (8 KiB; the pipe took 64 KiB when measured on the
+    laptop, and starts at 16 KiB on macOS). The shipped prompt is far below it."""
+    path = tmp_path / "prompt.txt"
+    path.write_text("x" * (gate.MAX_PROMPT_BYTES + 1))
+    with pytest.raises(gate.PromptUnavailable, match="too long"):
+        gate.load_prompt(path, "2026-11-23")
+    path.write_text("x" * gate.MAX_PROMPT_BYTES)
+    assert len(gate.load_prompt(path, "2026-11-23")) == gate.MAX_PROMPT_BYTES
+    shipped = gate.load_prompt(LAUNCHER / "prompt.txt", "2026-11-23")
+    assert len(shipped.encode()) < gate.MAX_PROMPT_BYTES // 4
+    assert gate.MAX_PROMPT_BYTES <= 16384
+
+
 def test_after_the_session_the_digest_is_built_and_noted(tmp_path):
     runs, digests = tmp_path / "runs", tmp_path / "digests"
     runs.mkdir()
