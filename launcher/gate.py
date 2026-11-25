@@ -292,14 +292,26 @@ def after_session(out, day: str, runs_dir: Path = RUNS_DIR, digests_dir: Path = 
         note(out, digest_failed=type(exc).__name__)
 
 
-def open_run_file(runs_dir: Path | None = None):
+def open_run_file(runs_dir: Path | None = None, *, clock=None, sleep=time.sleep):
     """L5: one file per run, created 0600 and handed to whoever owns the runs directory.
     install.sh gives that directory to the owner, so no user name is written into this
-    public file. The bot never holds a run file: root reads the child's stdout and writes."""
+    public file. The bot never holds a run file: root reads the child's stdout and writes.
+
+    A name taken by a run in the same UTC second makes this one wait for the next second
+    (CodeRabbit 4500759964): the name's format and time order stay what digest.py reads."""
     runs_dir = RUNS_DIR if runs_dir is None else runs_dir
+    clock = clock or (lambda: datetime.now(UTC))
     runs_dir.mkdir(mode=0o700, exist_ok=True)
-    name = datetime.now(UTC).strftime("run-%Y%m%dT%H%M%SZ.jsonl")
-    fd = os.open(runs_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    for attempt in range(3):
+        now = clock()
+        name = now.strftime("run-%Y%m%dT%H%M%SZ.jsonl")
+        try:
+            fd = os.open(runs_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            if attempt == 2:
+                raise
+            sleep(1 - now.microsecond / 1e6)
     owner = runs_dir.stat().st_uid
     if owner != os.geteuid():
         os.fchown(fd, owner, -1)

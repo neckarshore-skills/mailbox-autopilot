@@ -416,6 +416,28 @@ def test_leftovers_are_killed_by_the_bot_users_uid(monkeypatch):
     assert seen == [["/usr/bin/pkill", "-KILL", "-U", "mailbox-autopilot-bot"]]
 
 
+def test_two_runs_in_one_second_get_two_files(tmp_path):
+    """CodeRabbit 4500759964 on #101: a second run in the same UTC second hit O_EXCL and
+    raised before it could note anything. The name keeps its format (digest.py's
+    _RUN_NAME and the time order of names depend on it); a collision waits for the next
+    second instead."""
+    from datetime import UTC, datetime, timedelta
+
+    t0 = datetime(2026, 11, 25, 7, 0, 0, 400000, tzinfo=UTC)
+    ticks = iter([t0, t0 + timedelta(seconds=1)])
+    slept = []
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "run-20261125T070000Z.jsonl").write_text("first\n")
+    with gate.open_run_file(runs, clock=lambda: next(ticks), sleep=slept.append) as out:
+        out.write("second\n")
+    assert sorted(p.name for p in runs.iterdir()) == [
+        "run-20261125T070000Z.jsonl",
+        "run-20261125T070001Z.jsonl",
+    ]
+    assert slept == [pytest.approx(0.6)]
+
+
 def test_the_run_file_is_owner_only(tmp_path):
     with gate.open_run_file(tmp_path / "runs") as out:
         out.write("x\n")
