@@ -115,13 +115,30 @@ def _launchers_search(inp: object, expected: str) -> bool:
     return inp.get("since") == expected and inp.get("size") in (None, *BUCKETS)
 
 
-def _read_run(path: Path) -> _Run:
+def _regular_bytes(path: Path) -> bytes | None:
+    """C9 (James, #113): the content of `path` only if it is a regular file, judged on the
+    open descriptor. O_NOFOLLOW refuses a link the owner swaps in after collect()'s lstat,
+    O_NONBLOCK keeps a swapped-in FIFO from blocking the open."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return None
+        return f.read()
+
+
+def _read_run(path: Path) -> _Run | None:
+    data = _regular_bytes(path)
+    if data is None:
+        return None
     y, m, d = _RUN_NAME.fullmatch(path.name).groups()
     run = _Run(day=f"{y}-{m}-{d}")
     expected = _expected_since(run.day)
     uses: dict[str, object] = {}
     buckets: set[str] = set()
-    for line in path.read_bytes().splitlines():
+    for line in data.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
@@ -184,6 +201,8 @@ def collect(runs_dir: Path, day: str) -> Collected:
     complete: bool | None = None
     for path in names:
         run = _read_run(path)
+        if run is None:
+            continue
         for uid, r in run.seen:
             first.setdefault(uid, (run.day, r))
         if not run.searched:

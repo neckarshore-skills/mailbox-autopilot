@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,28 @@ def test_a_symlinked_run_file_is_not_followed(tmp_path):
     runs.mkdir()
     (runs / D_RUN).symlink_to(real)
     assert digest.collect(runs, DAY).records == {}
+
+
+def test_a_link_swapped_in_after_the_check_is_not_followed(tmp_path):
+    """C9 (James, #113): collect() checks lstat, then _read_run opened by name; the owner
+    could swap a link in between. _read_run itself opens O_NOFOLLOW and reads only a
+    descriptor that fstat says is a regular file."""
+    real = search_run(tmp_path / "elsewhere", D_RUN, [rec("1")])
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / D_RUN).symlink_to(real)
+    assert digest._read_run(runs / D_RUN) is None
+
+
+def test_a_fifo_swapped_in_does_not_hang_the_launcher(tmp_path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    os.mkfifo(runs / D_RUN)
+    got = []
+    t = threading.Thread(target=lambda: got.append(digest._read_run(runs / D_RUN)), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive() and got == [None]
 
 
 # ---- coverage: when may the digest say an exact number ----
