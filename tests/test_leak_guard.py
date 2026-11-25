@@ -783,3 +783,75 @@ def test_tree_mode_names_how_many_binary_files_it_did_not_read(tmp_path, monkeyp
     monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
     assert lg.main(["--tree"]) == 0
     assert "2 file(s) scanned, 0 hit(s), 1 binary file(s) not read" in capsys.readouterr().out
+
+
+# --- --commits RANGE: every commit of a pull request on its own (planning #4188, b0a0f301e1) --
+
+
+def _git(tmp_path, *args):
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t.invalid", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _add_then_remove(tmp_path):
+    """A branch that adds an address in one commit and removes it in the next. The net
+    diff of the branch is clean; the history it publishes is not."""
+    _git_tree(tmp_path, {"a.py": "x = 1\n"})
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "a.py").write_text("x = 'jane.doe@some-company.test'\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-q", "-am", "add")
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-q", "-am", "remove")
+    return base
+
+
+def test_an_address_added_and_removed_again_passes_the_net_diff(tmp_path, monkeypatch, capsys):
+    """The gap this mode closes: the net diff, what the workflow scanned, is clean."""
+    base = _add_then_remove(tmp_path)
+    (tmp_path / "pr.diff").write_text(_git(tmp_path, "diff", "-U0", f"{base}...HEAD") + "\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--diff", "pr.diff"]) == 0
+
+
+def test_commits_mode_finds_an_address_added_and_removed_again(tmp_path, monkeypatch, capsys):
+    base = _add_then_remove(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    rc = lg.main(["--commits", f"{base}..HEAD"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "a.py:1: email" in out and " add" in out  # names the commit that added it
+    assert "2 commit(s)" in out
+
+
+def test_commits_mode_with_clean_commits_passes(tmp_path, monkeypatch, capsys):
+    _git_tree(tmp_path, {"a.py": "x = 1\n"})
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-q", "-am", "change")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAK_GUARD_PRIVATE_LIST", raising=False)
+    assert lg.main(["--commits", f"{base}..HEAD"]) == 0
+    assert "1 commit(s)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [["--commits"], ["--commits", "nosuchref..HEAD"]])
+def test_commits_mode_fails_closed_without_a_range_it_can_read(tmp_path, monkeypatch, argv):
+    _git_tree(tmp_path, {"a.py": "x = 1\n"})
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    monkeypatch.chdir(tmp_path)
+    assert lg.main(argv) != 0
+
+
+def test_the_workflow_scans_every_commit_of_the_pull_request():
+    wf = (Path(__file__).parent.parent / ".github/workflows/leak-guard.yml").read_text()
+    assert "--commits" in wf and "origin/${BASE_REF}..HEAD" in wf

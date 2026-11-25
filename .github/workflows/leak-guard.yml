@@ -16,14 +16,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Scan the lines this pull request adds
+      # Every commit of the pull request on its own, not only the net diff: this repository
+      # is public, and a line added in one commit and removed in the next is published
+      # history after the merge (planning #4188; the pre-push hook does the same per push).
+      # HEAD is the pull request's merge commit, so its first-parent diff is the net diff.
+      - name: Scan the lines every commit of this pull request adds
         if: github.event_name == 'pull_request'
         env:
           LEAK_GUARD_PRIVATE_LIST: ${{ secrets.LEAK_GUARD_PRIVATE_LIST }}
           BASE_REF: ${{ github.base_ref }}
-        run: |
-          git diff -U0 --no-color --text --diff-filter=ACMRT "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
-          python3 scripts/leak_guard.py --diff /tmp/pr.diff
+        run: python3 scripts/leak_guard.py --commits "origin/${BASE_REF}..HEAD"
       # #74: content older than the pull request is scanned too, on every pull request
       # and on every push to main. The diff step above stays: it reads undiffed binaries.
       - name: Scan every tracked file
