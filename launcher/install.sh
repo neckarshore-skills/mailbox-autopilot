@@ -159,6 +159,29 @@ install_audit_log() {
   esac
 }
 
+install_backup_exclusion() {
+  # James, #102 departure 3: retention cannot reach a backup, so a backup keeps run files,
+  # digests and the audit log for as long as it lives. Excluding them is the owner's
+  # decision. tmutil covers Time Machine only; -p excludes the path, so a file rotation
+  # replaces (stderr) stays excluded.
+  local answer p
+  say "Exclude the bot's records from Time Machine backups (runs, digests, audit log, stderr)?"
+  read -r -p "[y/N] " answer </dev/tty || answer=""
+  case "$answer" in
+    y | Y)
+      # retention.py creates stderr/ on its first run; it exists from here on instead
+      [ -e "$BASE/stderr" ] || install -d -o root -g wheel -m 700 "$BASE/stderr"
+      for p in "$BASE/runs" "$BASE/digests" "$BASE/host-audit.log" "$BASE/stderr" \
+        "$BASE/launcher.stderr" "$BASE/retention.stderr"; do
+        [ -e "$p" ] || die "$p is missing; the steps before should have made it"
+        tmutil addexclusion -p "$p"
+      done
+      say "excluded from Time Machine; other backup tools are not touched"
+      ;;
+    *) say "not excluded; the records stay in any backup as long as it lives" ;;
+  esac
+}
+
 install_daemons() {
   say "the two LaunchDaemons, written but NOT loaded"
   local py
@@ -185,6 +208,7 @@ cmd_install() { # owner
   install_user
   install_launcher "$1"
   install_audit_log
+  install_backup_exclusion
   install_daemons
   install_pf
   say "done. Not loaded, not enabled. Check with: sudo $0 status"

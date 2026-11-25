@@ -417,3 +417,26 @@ def test_a_timestamp_without_a_zone_is_kept_and_retention_goes_on(tmp_path):
     log.write_text(naive + _line(91, now, n=1) + _line(1, now, n=2))
     assert retention.prune_audit(log, 90, now, flag=None) == 1
     assert [json.loads(x)["n"] for x in log.read_text().splitlines()] == [0, 2]
+
+
+# ---- James, #102 departure 3: backup exclusion is the owner's decision at install ----
+
+
+def test_the_backup_exclusion_asks_the_owner_and_defaults_to_no():
+    body = _function("install_backup_exclusion")
+    assert "</dev/tty" in body
+    assert "[y/N]" in body
+    assert 'case "$answer" in' in body and "y | Y)" in body
+    assert "tmutil addexclusion -p" in body
+    cmd = _function("cmd_install")
+    assert cmd.index("install_audit_log") < cmd.index("install_backup_exclusion")
+
+
+def test_the_excluded_paths_are_every_path_retention_prunes():
+    """A backup keeps what retention removes for as long as the backup lives, so the
+    exclusion covers exactly retention's paths."""
+    body = _function("install_backup_exclusion")
+    names = [retention.RUNS_DIR, retention.DIGESTS_DIR, retention.HOST_AUDIT,
+             retention.STDERR_DIR, *retention.STDERR_FILES]  # fmt: skip
+    for p in names:
+        assert f'"$BASE/{p.relative_to(retention.BASE)}"' in body
