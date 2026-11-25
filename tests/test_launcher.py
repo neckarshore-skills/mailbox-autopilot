@@ -5,6 +5,7 @@ the literal argv (L1, L2, L12), the wall clock (L12), the uv check (L10), the ru
 (L5) and the refusing credential seam (L11). Root ownership, the privilege drop, the plist
 and 5a to 5c are measured on the target Mac only, and nothing here stands in for them."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -34,6 +35,7 @@ gate = _load_gate()
 # Captured on the laptop, Claude Code 2.1.317, from build_argv() with the launcher's
 # environment and a throwaway stdio server named `mailbox` offering search and read.
 # Session id, paths and capability flags removed; the fields the gate reads are verbatim.
+# `plugins` is [] with the bot's settings.json (C1, measured 2026-11-25 on 2.1.317, 4 of 4).
 GOOD_INIT = {
     "type": "system",
     "subtype": "init",
@@ -41,6 +43,7 @@ GOOD_INIT = {
     "mcp_servers": [{"name": "mailbox", "status": "connected", "source": "dynamic"}],
     "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
     "skills": [],
+    "plugins": [],
     "slash_commands": [],
     "permissionMode": "default",
     "apiKeySource": "none",
@@ -101,6 +104,20 @@ def _survived_later(tmp_path) -> bool:
     return (tmp_path / "survived").exists()
 
 
+# One entry of the init's `plugins` list without the bot's settings (2.1.317, verbatim).
+BUILTIN_PRIVACY = {
+    "name": "cc-plugin-privacy",
+    "path": "builtin",
+    "source": "cc-plugin-privacy@builtin",
+}
+# The three built-ins 2.1.317 loads despite --setting-sources "" (#76 comment 6613844998).
+MEASURED_BUILTINS = {
+    "cc-plugin-agents-md@builtin",
+    "cc-plugin-privacy@builtin",
+    "cc-plugin-plugin-authoring@builtin",
+}
+
+
 # ---- L8, the init gate ----
 
 
@@ -122,6 +139,9 @@ def test_good_init_runs_and_every_line_reaches_the_run_file(tmp_path):
         {"mcp_servers": []},
         {"tools": None},
         {"subtype": "status"},
+        {"plugins": [BUILTIN_PRIVACY]},
+        {"plugins": None},
+        {"plugins": "cc-plugin-privacy"},
     ],
     ids=[
         "bash",
@@ -133,6 +153,9 @@ def test_good_init_runs_and_every_line_reaches_the_run_file(tmp_path):
         "no-server",
         "no-tools",
         "not-init",
+        "builtin-plugin",
+        "no-plugin-list",
+        "plugins-not-a-list",
     ],
 )
 def test_a_mismatched_init_kills_the_child_before_it_can_go_on(tmp_path, change):
@@ -143,6 +166,13 @@ def test_a_mismatched_init_kills_the_child_before_it_can_go_on(tmp_path, change)
     assert lines[-1]["launcher"]["refused"] == "gate"
     assert {"type": "assistant"} not in lines
     assert not survived
+
+
+def test_an_init_without_a_plugin_list_is_refused(tmp_path):
+    init = {k: v for k, v in GOOD_INIT.items() if k != "plugins"}
+    rc, lines, _ = _run(tmp_path, [init, {"type": "assistant"}])
+    assert rc == gate.EXIT_GATE
+    assert lines[-1]["launcher"] == {"refused": "gate", "reason": "init carries no plugin list"}
 
 
 def test_a_first_line_that_is_not_json_is_refused(tmp_path):
@@ -201,6 +231,36 @@ def test_a_host_that_outlives_a_clean_session_is_killed(tmp_path):
     rc, _, _ = _run(tmp_path, [GOOD_INIT], after=ORPHAN)
     assert rc == gate.EXIT_OK
     assert not _survived_later(tmp_path)
+
+
+class _Unreaped:
+    """A child that SIGKILL does not reap in time (uninterruptible sleep, for one)."""
+
+    pid = 999999
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            pytest.fail("an unbounded wait")
+        raise subprocess.TimeoutExpired("claude", timeout)
+
+
+def test_the_wait_after_sigkill_is_bounded(monkeypatch):
+    """CodeRabbit 4500759967 on #101: the wait after the final SIGKILL had no bound."""
+    monkeypatch.setattr(gate.os, "killpg", lambda pid, sig: None)
+    assert gate._kill(_Unreaped()) is False
+
+
+def test_a_child_that_is_not_reaped_is_noted(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "_kill", lambda proc: (proc.wait(), False)[1])
+    rc, lines, _ = _run(tmp_path, [GOOD_INIT, {"type": "result", "subtype": "success"}])
+    assert rc == gate.EXIT_OK
+    assert lines[-1] == {"launcher": {"cleanup": "child not reaped after SIGKILL"}}
 
 
 class _BrokenRunFile:
@@ -310,9 +370,22 @@ def test_the_uv_pin_is_the_ci_pin():
 # ---- L11 seam and L5 run file ----
 
 
+@pytest.fixture(autouse=True)
+def _no_managed_settings(tmp_path, monkeypatch):
+    """main() checks the managed-settings paths of the Mac it runs on; tests look at a
+    place that is empty unless a test puts something there."""
+    monkeypatch.setattr(gate, "MANAGED_DIR", tmp_path / "managed" / "ClaudeCode")
+    monkeypatch.setattr(
+        gate,
+        "MANAGED_PREFS",
+        (tmp_path / "prefs" / "device.plist", tmp_path / "prefs" / "bot" / "user.plist"),
+    )
+
+
 def _main_without_root(tmp_path, monkeypatch, version_reason=None):
     calls = []
     monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "PROMPT_FILE", LAUNCHER / "prompt.txt")
     monkeypatch.setattr(gate, "kill_leftovers", lambda: calls.append("kill") or 0)
     monkeypatch.setattr(
         gate, "check_claude_version", lambda *a, **k: calls.append("version") or version_reason
@@ -373,6 +446,28 @@ def test_leftovers_are_killed_by_the_bot_users_uid(monkeypatch):
     assert seen == [["/usr/bin/pkill", "-KILL", "-U", "mailbox-autopilot-bot"]]
 
 
+def test_two_runs_in_one_second_get_two_files(tmp_path):
+    """CodeRabbit 4500759964 on #101: a second run in the same UTC second hit O_EXCL and
+    raised before it could note anything. The name keeps its format (digest.py's
+    _RUN_NAME and the time order of names depend on it); a collision waits for the next
+    second instead."""
+    from datetime import UTC, datetime, timedelta
+
+    t0 = datetime(2026, 11, 25, 7, 0, 0, 400000, tzinfo=UTC)
+    ticks = iter([t0, t0 + timedelta(seconds=1)])
+    slept = []
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "run-20261125T070000Z.jsonl").write_text("first\n")
+    with gate.open_run_file(runs, clock=lambda: next(ticks), sleep=slept.append) as out:
+        out.write("second\n")
+    assert sorted(p.name for p in runs.iterdir()) == [
+        "run-20261125T070000Z.jsonl",
+        "run-20261125T070001Z.jsonl",
+    ]
+    assert slept == [pytest.approx(0.6)]
+
+
 def test_the_run_file_is_owner_only(tmp_path):
     with gate.open_run_file(tmp_path / "runs") as out:
         out.write("x\n")
@@ -418,9 +513,21 @@ def test_launch_refuses_a_uv_of_another_version_with_one_line(tmp_path):
 
 
 def test_launch_refuses_when_uv_is_missing(tmp_path):
-    proc, _ = _launch(tmp_path, None)
+    proc, runs = _launch(tmp_path, None)
     assert proc.returncode == 20
     assert "no uv at" in proc.stderr
+    (run,) = runs.iterdir()
+    assert json.loads(run.read_text()) == {"launcher": {"refused": "uv", "reason": "missing"}}
+
+
+def test_the_refusal_line_carries_a_fixed_code_whatever_uv_prints(tmp_path):
+    """C4 (James, #101): what uv prints never reaches the run file's JSON. The detail goes
+    to stderr as plain text."""
+    proc, runs = _launch(tmp_path, 'uv 0.13.6"},"x":{"y":"\\')
+    assert proc.returncode == 20
+    (run,) = runs.iterdir()
+    assert json.loads(run.read_text()) == {"launcher": {"refused": "uv", "reason": "version"}}
+    assert "expected 0.13.5" in proc.stderr
 
 
 def test_launch_starts_the_gate_from_an_empty_environment(tmp_path):
@@ -450,6 +557,35 @@ def test_the_bot_settings_turn_auto_memory_off_and_deny_built_in_tools():
     assert "hooks" not in settings and "env" not in settings
 
 
+# C5 (James, #101): every built-in tool 2.1.317 offers without --tools "" (measured
+# 2026-11-25, launcher environment, stub server), plus the four names James listed, of
+# which Glob, Grep and Agent were not offered in that measurement.
+MEASURED_BUILTIN_TOOLS = {
+    "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
+    "ExitWorktree", "ListAgents", "Monitor", "NotebookEdit", "Read", "ReportFindings",
+    "ScheduleWakeup", "SendMessage", "Task", "TaskStop", "ToolSearch", "WebFetch",
+    "WebSearch", "Workflow", "Write",
+}  # fmt: skip
+JAMES_NAMED = {"Agent", "Glob", "Grep", "NotebookEdit"}
+
+
+def test_the_bot_settings_deny_every_measured_built_in_tool():
+    """Second layer only: --tools "" and the init gate already keep these out."""
+    deny = json.loads((LAUNCHER / "settings.json").read_text())["permissions"]["deny"]
+    assert set(deny) == MEASURED_BUILTIN_TOOLS | JAMES_NAMED
+    assert deny == sorted(deny)
+
+
+def test_the_bot_settings_shut_the_built_in_plugins_off_at_load():
+    """C1 (James, #101): pinning `plugins` in init detects after the fact; these two keys
+    stop the built-ins from loading. Measured on 2.1.317: both keys give `plugins: []`;
+    disableAllHooks alone puts a system/ui_invalidate event before init, which the gate
+    would refuse on every run, so the two keys belong together."""
+    settings = json.loads((LAUNCHER / "settings.json").read_text())
+    assert settings["disableAllHooks"] is True
+    assert settings["enabledPlugins"] == dict.fromkeys(MEASURED_BUILTINS, False)
+
+
 def test_launch_never_follows_a_link_planted_in_the_owners_runs_directory(tmp_path):
     """The runs directory belongs to the owner, and launch.sh runs as root: a symlink
     under the refusal file's name must not make root write through it."""
@@ -474,3 +610,193 @@ def test_launch_never_follows_a_link_planted_in_the_owners_runs_directory(tmp_pa
     proc = subprocess.run(["bash", str(copy)], capture_output=True, text=True)
     assert proc.returncode == 20
     assert target.read_text() == "untouched\n"
+
+
+# ---- the prompt file and the digest after the session (#76 section 3 (i), L5) ----
+
+
+def test_the_shipped_prompt_names_the_task_and_the_day_token():
+    text = (LAUNCHER / "prompt.txt").read_text()
+    assert gate.SINCE_TOKEN in text and "search" in text
+    assert gate.load_prompt(LAUNCHER / "prompt.txt", "2026-11-23").count("2026-11-23") >= 1
+    assert gate.SINCE_TOKEN not in gate.load_prompt(LAUNCHER / "prompt.txt", "2026-11-23")
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"], ids=["absent", "empty", "blank"])
+def test_a_missing_prompt_is_a_refusal_not_a_traceback(tmp_path, content):
+    path = tmp_path / "prompt.txt"
+    if content is not None:
+        path.write_text(content)
+    with pytest.raises(gate.PromptUnavailable):
+        gate.load_prompt(path, "2026-11-23")
+
+
+def test_a_prompt_too_long_for_one_pipe_write_is_refused(tmp_path):
+    """CodeRabbit 4500759977 on #101: the prompt is written to the child's stdin before
+    the deadlines are watched. A prompt that fits the pipe buffer at once cannot block;
+    MAX_PROMPT_BYTES keeps it there (8 KiB; the pipe took 64 KiB when measured on the
+    laptop, and starts at 16 KiB on macOS). The shipped prompt is far below it."""
+    path = tmp_path / "prompt.txt"
+    path.write_text("x" * (gate.MAX_PROMPT_BYTES + 1))
+    with pytest.raises(gate.PromptUnavailable, match="too long"):
+        gate.load_prompt(path, "2026-11-23")
+    path.write_text("x" * gate.MAX_PROMPT_BYTES)
+    assert len(gate.load_prompt(path, "2026-11-23")) == gate.MAX_PROMPT_BYTES
+    shipped = gate.load_prompt(LAUNCHER / "prompt.txt", "2026-11-23")
+    assert len(shipped.encode()) < gate.MAX_PROMPT_BYTES // 4
+    assert gate.MAX_PROMPT_BYTES <= 16384
+
+
+def test_after_the_session_the_digest_is_built_and_noted(tmp_path):
+    runs, digests = tmp_path / "runs", tmp_path / "digests"
+    runs.mkdir()
+    digests.mkdir()
+    out_path = tmp_path / "out.jsonl"
+    with out_path.open("w") as out:
+        gate.after_session(out, "2026-11-23", runs, digests)
+    note = json.loads(out_path.read_text())["launcher"]
+    assert note["digest"] == {"day": "2026-11-23", "mails": 0, "complete": False}
+    assert (digests / "digest-2026-11-23.md").exists()
+
+
+def test_a_digest_that_cannot_be_built_is_noted_and_the_launcher_goes_on(tmp_path):
+    out_path = tmp_path / "out.jsonl"
+    with out_path.open("w") as out:
+        gate.after_session(out, "2026-11-23", tmp_path / "runs", tmp_path / "missing")
+    assert json.loads(out_path.read_text())["launcher"] == {"digest_failed": "FileNotFoundError"}
+
+
+def test_gate_loads_digest_by_its_path_not_by_a_search():
+    source = (LAUNCHER / "gate.py").read_text()
+    assert not re.search(r"^\s*(from|import)\s+digest", source, re.M)
+    assert gate._digest().SEARCH == "mcp__mailbox__search"
+
+
+def test_a_missing_prompt_stops_before_the_credential_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "credential_step", lambda env: pytest.fail("credential read"))
+    monkeypatch.setattr(gate, "after_session", lambda *a: pytest.fail("digest built"))
+    monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "PROMPT_FILE", tmp_path / "prompt.txt")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: 0)
+    monkeypatch.setattr(gate, "check_claude_version", lambda *a, **k: None)
+    assert gate.main() == gate.EXIT_PROMPT
+    (run,) = (tmp_path / "runs").iterdir()
+    assert json.loads(run.read_text().splitlines()[-1])["launcher"]["refused"] == "prompt"
+
+
+def test_a_session_is_followed_by_yesterdays_digest(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "PROMPT_FILE", LAUNCHER / "prompt.txt")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: 0)
+    monkeypatch.setattr(gate, "check_claude_version", lambda *a, **k: None)
+    monkeypatch.setattr(gate, "credential_step", lambda env: env)
+    monkeypatch.setattr(
+        gate, "supervise", lambda argv, env, prompt, out: seen.update(p=prompt) or 14
+    )
+    monkeypatch.setattr(gate, "after_session", lambda out, day: seen.update(day=day))
+    assert gate.main() == gate.EXIT_CHILD  # the session's code stands, the digest is a report
+    assert seen["day"] == gate.yesterday()
+    assert f'since "{seen["day"]}"' in seen["p"]
+
+
+def test_a_missing_digest_file_does_not_stop_the_session(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(gate, "DIGEST", tmp_path / "absent.py")
+    monkeypatch.setattr(gate, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(gate, "DIGESTS_DIR", tmp_path / "digests")
+    monkeypatch.setattr(gate, "PROMPT_FILE", LAUNCHER / "prompt.txt")
+    monkeypatch.setattr(gate, "kill_leftovers", lambda: 0)
+    monkeypatch.setattr(gate, "check_claude_version", lambda *a, **k: None)
+    monkeypatch.setattr(gate, "credential_step", lambda env: env)
+    monkeypatch.setattr(gate, "supervise", lambda *a: started.append(1) or gate.EXIT_OK)
+    assert gate.main() == gate.EXIT_OK and started == [1]
+    (run,) = (tmp_path / "runs").iterdir()
+    assert json.loads(run.read_text().splitlines()[-1])["launcher"] == {
+        "digest_failed": "FileNotFoundError"
+    }
+
+
+# ---- C2 (James, #101): managed settings outrank --settings, so their presence refuses ----
+
+
+def test_the_managed_paths_are_the_ones_2_1_317_reads():
+    """From `strings` on the pinned binary: the ClaudeCode directory (managed-settings.json,
+    managed-settings.d/, managed-mcp.json) and the managed preferences of the domain
+    com.anthropic.claudecode, device-level and per user."""
+    real = _load_gate()
+    assert real.MANAGED_DIR == Path("/Library/Application Support/ClaudeCode")
+    assert real.MANAGED_PREFS == (
+        Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"),
+        Path(f"/Library/Managed Preferences/{real.BOT_USER}/com.anthropic.claudecode.plist"),
+    )
+    assert real.MANAGED_PINNED == frozenset()
+
+
+def _managed(tmp_path):
+    d = tmp_path / "ClaudeCode"
+    prefs = (tmp_path / "device.plist", tmp_path / "user.plist")
+    return d, prefs
+
+
+def test_no_managed_settings_pass(tmp_path):
+    d, prefs = _managed(tmp_path)
+    assert gate.check_managed(d, prefs, frozenset()) is None
+    d.mkdir()
+    assert gate.check_managed(d, prefs, frozenset()) is None  # an empty directory
+
+
+@pytest.mark.parametrize(
+    "plant",
+    ["managed-settings.json", "managed-mcp.json", "anything-else.json"],
+)
+def test_a_managed_file_refuses_unless_its_hash_is_pinned(tmp_path, plant):
+    d, prefs = _managed(tmp_path)
+    d.mkdir()
+    (d / plant).write_text('{"hooks": {}}')
+    assert gate.check_managed(d, prefs, frozenset()) == f"managed settings present: {plant}"
+    digest = hashlib.sha256(b'{"hooks": {}}').hexdigest()
+    assert gate.check_managed(d, prefs, frozenset({digest})) is None
+
+
+def test_a_drop_in_directory_or_a_link_refuses(tmp_path):
+    d, prefs = _managed(tmp_path)
+    d.mkdir()
+    (d / "managed-settings.d").mkdir()
+    assert gate.check_managed(d, prefs, frozenset()) == (
+        "managed settings present: managed-settings.d"
+    )
+    (d / "managed-settings.d").rmdir()
+    (d / "managed-settings.json").symlink_to(tmp_path / "nowhere")  # dangling counts
+    assert gate.check_managed(d, prefs, frozenset()) == (
+        "managed settings present: managed-settings.json"
+    )
+
+
+def test_the_managed_directory_as_a_link_refuses(tmp_path):
+    d, prefs = _managed(tmp_path)
+    (tmp_path / "real").mkdir()
+    d.symlink_to(tmp_path / "real")
+    assert gate.check_managed(d, prefs, frozenset()) == "managed settings present: ClaudeCode"
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["device", "per-user"])
+def test_managed_preferences_refuse(tmp_path, which):
+    d, prefs = _managed(tmp_path)
+    prefs[which].write_bytes(b"plist")
+    assert gate.check_managed(d, prefs, frozenset()) == (
+        f"managed settings present: {prefs[which].name}"
+    )
+
+
+def test_managed_settings_stop_before_the_credential_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "credential_step", lambda env: pytest.fail("credential read"))
+    gate.MANAGED_DIR.mkdir(parents=True)
+    (gate.MANAGED_DIR / "managed-settings.json").write_text("{}")
+    rc, notes, calls = _main_without_root(tmp_path, monkeypatch)
+    assert rc == gate.EXIT_MANAGED
+    assert calls == ["kill", "version"]
+    assert notes[-1] == {
+        "refused": "managed",
+        "reason": "managed settings present: managed-settings.json",
+    }

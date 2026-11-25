@@ -16,10 +16,14 @@ GATE="/Library/Application Support/mailbox-autopilot/launcher/gate.py"
 RUNS_DIR="/Library/Application Support/mailbox-autopilot/runs"
 # ---- end pinned ----
 
-refuse() { # one line to the run file (L5) and to stderr (L13), then a non-zero exit
+refuse() { # CODE DETAIL: one line to the run file (L5) and to stderr (L13), then exit 20
+  # C4 (James, #101): the JSON line carries only a fixed code, never what uv printed; the
+  # detail goes to stderr as plain text.
   local line file owner
+  case "$1" in missing | version) ;; *) set -- unknown "$2" ;; esac
   line="{\"launcher\": {\"refused\": \"uv\", \"reason\": \"$1\"}}"
   printf '%s\n' "$line" >&2
+  printf 'launch.sh: %s\n' "$2" >&2
   if [ -d "$RUNS_DIR" ] && [ ! -L "$RUNS_DIR" ]; then
     # The runs directory belongs to the owner, so root never follows or overwrites a name
     # in it: noclobber opens with O_EXCL, which also refuses a planted symlink.
@@ -31,9 +35,9 @@ refuse() { # one line to the run file (L5) and to stderr (L13), then a non-zero 
   exit 20
 }
 
-[ -x "$UV" ] || refuse "no uv at $UV, expected $UV_VERSION"
+[ -x "$UV" ] || refuse missing "no uv at $UV, expected $UV_VERSION"
 found="$("$UV" --version 2>/dev/null | awk '{print $2}')" || found=""
-[ "$found" = "$UV_VERSION" ] || refuse "uv version: expected $UV_VERSION, found ${found:-nothing}"
+[ "$found" = "$UV_VERSION" ] || refuse version "uv version: expected $UV_VERSION, found ${found:-nothing}"
 
 exec /usr/bin/env -i \
   PATH=/usr/bin:/bin \

@@ -3,6 +3,9 @@
 - run files (stdout and transcript, one per run): 14 days, by modification time
 - digests: 30 days, by modification time
 - host-audit.log: 90 days, by the `timestamp` of each line
+- launcher.stderr and retention.stderr (L13): moved aside once a day when not empty, and
+  the moved files kept 14 days, like the run files, since claude's own stderr lands there
+- first of all, whatever the bot user still runs is killed (C3), like gate.py does
 
 The audit log carries the system append-only flag, which only root can clear, and only at
 securelevel 0. It is pruned by writing the kept lines to a new file beside it, giving that
@@ -20,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -29,6 +33,9 @@ BASE = Path("/Library/Application Support/mailbox-autopilot")
 RUNS_DIR = BASE / "runs"
 DIGESTS_DIR = BASE / "digests"
 HOST_AUDIT = BASE / "host-audit.log"
+STDERR_FILES = (BASE / "launcher.stderr", BASE / "retention.stderr")  # plists.py, L13
+STDERR_DIR = BASE / "stderr"
+BOT_USER = "mailbox-autopilot-bot"  # gate.py's; a test holds the two equal
 
 RUN_DAYS = 14
 DIGEST_DAYS = 30
@@ -53,12 +60,53 @@ def prune_dir(directory: Path, days: int, now: float) -> list[str]:
     return removed
 
 
+def rotate_stderr(paths, dest: Path, now: float) -> list[str]:
+    """Move each filled stderr file into `dest` under a dated name. launchd opens the path
+    afresh each time it starts the job, and this job runs outside the run hours, so the
+    next run writes to what is in the path then. An empty file stays; a symlink is never
+    touched.
+
+    C6: launchd creates a missing StandardErrorPath file 0644, whatever the plist's Umask
+    says, and appends to an existing one without changing its mode (measured 2026-11-25,
+    macOS 27.2.1, gui domain). So a moved or absent file is replaced at once by an empty
+    0600 one, and launchd appends to that."""
+    dest.mkdir(mode=0o700, exist_ok=True)
+    stamp = datetime.fromtimestamp(now, UTC).strftime("%Y%m%dT%H%M%SZ")
+    moved = []
+    for path in paths:
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            _owner_only_empty(path)
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
+            continue
+        name = f"{path.name}-{stamp}"
+        os.replace(path, dest / name)
+        moved.append(name)
+        _owner_only_empty(path)
+    return moved
+
+
+def _owner_only_empty(path: Path) -> None:
+    """An empty 0600 file in `path`; never follows or replaces what is already there."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return
+    os.fchmod(fd, 0o600)  # the mode argument is masked by the umask; this is not
+    os.close(fd)
+
+
 def _line_time(line: bytes) -> datetime | None:
+    """The line's time, or None when it cannot be read; a time without a zone cannot be
+    compared with the cutoff, so it counts as unreadable and the line is kept."""
     try:
         stamp = json.loads(line)["timestamp"]
-        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
+    return when if when.tzinfo is not None else None
 
 
 def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPEND) -> int:
@@ -88,7 +136,7 @@ def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPE
         st = path.stat()
         fd = os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
-            os.write(fd, b"".join(kept))
+            _write_all(fd, b"".join(kept))
             if os.geteuid() == 0:
                 os.fchown(fd, st.st_uid, st.st_gid)
             os.fchmod(fd, stat.S_IMODE(st.st_mode))
@@ -97,18 +145,41 @@ def prune_audit(path: Path, days: int, now: float, *, flag: int | None = SF_APPE
             os.close(fd)
         if flag is not None:
             os.chflags(path, st.st_flags & ~flag)
-        os.replace(fresh, path)
+        try:
+            os.replace(fresh, path)
+        except OSError:
+            # C7: the live log keeps its lines; give it its flag back before reporting.
+            if flag is not None:
+                os.chflags(path, st.st_flags | flag)
+            raise
     if flag is not None:
         os.chflags(path, path.stat().st_flags | flag)
     return dropped
 
 
+def kill_leftovers(user: str = BOT_USER) -> int:
+    """C3 (James, #101): gate.py kills what the bot user still runs at the start of each
+    run, but the last run is at 20:00 and the next at 07:00, so an orphan of the evening
+    run would live eleven hours. This job at 05:30 kills it too."""
+    return subprocess.run(["/usr/bin/pkill", "-KILL", "-U", user], check=False).returncode
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """C7: os.write may write less than it was given; a short write would drop records."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
 def main() -> int:
     now = time.time()
     report = {
+        "leftovers_killed": kill_leftovers() == 0,
         "runs": prune_dir(RUNS_DIR, RUN_DAYS, now),
         "digests": prune_dir(DIGESTS_DIR, DIGEST_DAYS, now),
         "audit_lines_dropped": prune_audit(HOST_AUDIT, AUDIT_DAYS, now),
+        "stderr_rotated": rotate_stderr(STDERR_FILES, STDERR_DIR, now),
+        "stderr_pruned": prune_dir(STDERR_DIR, RUN_DAYS, now),
     }
     print(json.dumps({"retention": report}, sort_keys=True), file=sys.stderr)
     return 0

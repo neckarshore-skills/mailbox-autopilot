@@ -100,39 +100,86 @@ install_launcher() { # owner
   say "launcher files, root-owned (L3)"
   install -d -o root -g wheel -m 755 "$BASE" "$BASE/launcher" "$BASE/launcher/empty"
   install -o root -g wheel -m 755 "$SRC/launch.sh" "$BASE/launcher/launch.sh"
-  install -o root -g wheel -m 644 "$SRC/gate.py" "$SRC/retention.py" \
-    "$SRC/settings.json" "$SRC/host.json" "$BASE/launcher/"
+  install -o root -g wheel -m 644 "$SRC/gate.py" "$SRC/digest.py" "$SRC/retention.py" \
+    "$SRC/prompt.txt" "$SRC/settings.json" "$SRC/host.json" "$BASE/launcher/"
   say "run files and digests go to $1 only (L5)"
   install -d -o "$1" -g staff -m 700 "$BASE/runs" "$BASE/digests"
+  # C6: launchd creates a missing StandardErrorPath file 0644 whatever Umask says, and
+  # appends to an existing one without changing its mode (measured 2026-11-25).
+  say "stderr files root-only before launchd opens them (L13, L5)"
+  for f in launcher.stderr retention.stderr; do
+    [ ! -L "$BASE/$f" ] || die "$BASE/$f is a symlink"
+    [ -e "$BASE/$f" ] || install -o root -g wheel -m 600 /dev/null "$BASE/$f"
+    chown root:wheel "$BASE/$f"
+    chmod 600 "$BASE/$f"
+  done
 }
 
 install_user() {
+  # Every step is checked on every run (CodeRabbit 4507077128): an install interrupted
+  # behind sysadminctl left an account without group, membership or hidden flag.
+  dseditgroup -o read "$BOT_GROUP" >/dev/null 2>&1 ||
+    dseditgroup -o create -r "mailbox-autopilot bot" "$BOT_GROUP"
   if id "$BOT_USER" >/dev/null 2>&1; then
-    say "user $BOT_USER exists"
-    return
+    say "user $BOT_USER exists; group, membership, hidden flag and home checked again"
+  else
+    say "the bot user: not an admin, never logged in"
+    # The password handling follows L11, which the keychain probe decides. Until then
+    # sysadminctl prompts for it ('-'), so it never stands in a process list: type a long
+    # throwaway and keep it nowhere. No login shell, hidden from the login window.
+    say "sysadminctl asks for the bot's password now: type a long throwaway, keep it nowhere"
+    sysadminctl -addUser "$BOT_USER" -fullName "Mailbox Autopilot Bot" -shell /usr/bin/false \
+      -password -
   fi
-  say "the bot group and user: not an admin, never logged in"
-  dseditgroup -o create -r "mailbox-autopilot bot" "$BOT_GROUP"
-  # The password handling follows L11, which the keychain probe decides. Until then
-  # sysadminctl prompts for it ('-'), so it never stands in a process list: type a long
-  # throwaway and keep it nowhere. No login shell, hidden from the login window.
-  say "sysadminctl asks for the bot's password now: type a long throwaway, keep it nowhere"
-  sysadminctl -addUser "$BOT_USER" -fullName "Mailbox Autopilot Bot" -shell /usr/bin/false \
-    -password -
   dscl . -create "/Users/$BOT_USER" IsHidden 1
-  dseditgroup -o edit -a "$BOT_USER" -t user "$BOT_GROUP"
-  createhomedir -c -u "$BOT_USER" >/dev/null
+  dseditgroup -o checkmember -m "$BOT_USER" "$BOT_GROUP" >/dev/null 2>&1 ||
+    dseditgroup -o edit -a "$BOT_USER" -t user "$BOT_GROUP"
+  [ -d "/Users/$BOT_USER" ] || createhomedir -c -u "$BOT_USER" >/dev/null
 }
 
 install_audit_log() {
+  # An existing log is checked, not trusted (CodeRabbit 4507077134): a chflags that failed
+  # on an earlier run left it without sappend, and the host then refuses every session.
   local log="$BASE/host-audit.log"
-  if [ -e "$log" ]; then
-    say "host-audit.log exists; left as it is"
-    return
+  [ ! -L "$log" ] || die "$log is a symlink"
+  if [ ! -e "$log" ]; then
+    say "host-audit.log: owned by the bot, system append-only (section 5.5)"
+    install -o "$BOT_USER" -g "$BOT_GROUP" -m 600 /dev/null "$log"
+    chflags sappend "$log"
   fi
-  say "host-audit.log: owned by the bot, system append-only (section 5.5)"
-  install -o "$BOT_USER" -g "$BOT_GROUP" -m 600 /dev/null "$log"
-  chflags sappend "$log"
+  [ -f "$log" ] || die "$log is not a regular file"
+  [ "$(stat -f %Su "$log")" = "$BOT_USER" ] || die "$log is not owned by $BOT_USER"
+  [ "$(stat -f %Lp "$log")" = "600" ] || die "$log is not mode 600"
+  case ",$(stat -f %Sf "$log")," in
+    *,sappnd,*) say "host-audit.log: owner, mode and sappend checked" ;;
+    *)
+      say "host-audit.log had no sappend; set again"
+      chflags sappend "$log"
+      ;;
+  esac
+}
+
+install_backup_exclusion() {
+  # James, #102 departure 3: retention cannot reach a backup, so a backup keeps run files,
+  # digests and the audit log for as long as it lives. Excluding them is the owner's
+  # decision. tmutil covers Time Machine only; -p excludes the path, so a file rotation
+  # replaces (stderr) stays excluded.
+  local answer p
+  say "Exclude the bot's records from Time Machine backups (runs, digests, audit log, stderr)?"
+  read -r -p "[y/N] " answer </dev/tty || answer=""
+  case "$answer" in
+    y | Y)
+      # retention.py creates stderr/ on its first run; it exists from here on instead
+      [ -e "$BASE/stderr" ] || install -d -o root -g wheel -m 700 "$BASE/stderr"
+      for p in "$BASE/runs" "$BASE/digests" "$BASE/host-audit.log" "$BASE/stderr" \
+        "$BASE/launcher.stderr" "$BASE/retention.stderr"; do
+        [ -e "$p" ] || die "$p is missing; the steps before should have made it"
+        tmutil addexclusion -p "$p"
+      done
+      say "excluded from Time Machine; other backup tools are not touched"
+      ;;
+    *) say "not excluded; the records stay in any backup as long as it lives" ;;
+  esac
 }
 
 install_daemons() {
@@ -161,6 +208,7 @@ cmd_install() { # owner
   install_user
   install_launcher "$1"
   install_audit_log
+  install_backup_exclusion
   install_daemons
   install_pf
   say "done. Not loaded, not enabled. Check with: sudo $0 status"

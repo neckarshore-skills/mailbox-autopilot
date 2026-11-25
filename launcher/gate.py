@@ -9,22 +9,28 @@ Standard library only, and nothing is imported from the mailbox_cleanup package.
 pinned list lives here on purpose (L8): widening the bot takes two keys, the package and
 this root-owned file. tests/test_launcher.py holds the literals against the host.
 
+After the session it builds the owner's digest of the day before (launcher/digest.py,
+loaded by its path): counted from the run files, never from what the model wrote.
+
 Not done here, by design:
 - The credential step (L11) is a seam that refuses, so this launcher cannot start a
   session until the keychain probe has an answer. See credential_step().
-- Root ownership, the plist, managed settings, pf and retention are slice 2.
+- Root ownership, the plist, pf and retention are slice 2 (install.sh, plists.py).
 """
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import os
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # ---- pinned (L8): change only together with the host, and James reads the change ----
@@ -40,14 +46,34 @@ CLAUDE = Path("/usr/local/mailbox-autopilot/claude/claude")
 MCP_CONFIG = BASE / "launcher" / "host.json"
 SETTINGS = BASE / "launcher" / "settings.json"  # the bot's own settings, not managed (PR)
 PROMPT_FILE = BASE / "launcher" / "prompt.txt"
+SINCE_TOKEN = "{since}"  # prompt.txt names the day to search from; the launcher fills it
+# The prompt goes to the child's stdin in one write before the deadlines are watched; a
+# prompt that fits the pipe buffer at once cannot block that write (CodeRabbit 4500759977).
+MAX_PROMPT_BYTES = 8192
 RUNS_DIR = BASE / "runs"  # L5: owner-only files, one per run
+DIGESTS_DIR = BASE / "digests"  # L5: one digest a day, owner-only
+DIGEST = Path(__file__).with_name("digest.py")
 WORK_DIR = BASE / "launcher" / "empty"  # 5c: no CLAUDE.md, no .claude/
 BOT_USER = "mailbox-autopilot-bot"
 BOT_GROUP = "mailbox-autopilot-bot"
 BOT_HOME = Path("/Users/mailbox-autopilot-bot")
+# C2 (James, #101): managed settings outrank --settings, so a managed file would bring its
+# hooks into the bot's session. These are the places 2.1.317 reads on macOS (`strings` on
+# the pinned binary): the whole ClaudeCode directory (managed-settings.json, the drop-in
+# directory managed-settings.d/, managed-mcp.json) and the managed preferences of the
+# domain com.anthropic.claudecode. Anything present refuses, unless it is a regular file
+# whose sha256 is pinned below. Server-managed settings on the owner's account are not
+# visible from here (ungemessen, a console check).
+MANAGED_DIR = Path("/Library/Application Support/ClaudeCode")
+MANAGED_PREFS = (
+    Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"),
+    Path(f"/Library/Managed Preferences/{BOT_USER}/com.anthropic.claudecode.plist"),
+)
+MANAGED_PINNED: frozenset[str] = frozenset()  # sha256 of an accepted managed file
 MAX_TURNS = 12  # L12
 WALL_CLOCK_S = 300  # L12: the whole session
 INIT_TIMEOUT_S = 60  # the first event must be system/init
+KILL_WAIT_S = 10  # after SIGKILL, before the launcher gives up waiting for the child
 
 # exit codes of the launcher (the PR states them)
 EXIT_OK = 0
@@ -58,6 +84,8 @@ EXIT_WALL_CLOCK = 13  # L12
 EXIT_CHILD = 14  # claude ended non-zero
 EXIT_TERMINATED = 15  # SIGTERM, from launchd or root; the session was killed first
 EXIT_VERSION = 16  # L4: the installed claude is not CLAUDE_VERSION
+EXIT_PROMPT = 17  # prompt.txt is absent or blank
+EXIT_MANAGED = 18  # C2: a managed-settings source is present and not pinned
 
 
 def build_env() -> dict[str, str]:
@@ -134,7 +162,8 @@ def build_argv(
 
 def check_init(event: object) -> str | None:
     """L8: None when the first event is system/init and offers exactly the pinned tools
-    from exactly one server. Otherwise the reason, which goes to the run file."""
+    from exactly one server, with no plugin loaded. Otherwise the reason, which goes to
+    the run file."""
     if not isinstance(event, dict):
         return "first event is not an object"
     if event.get("type") != "system" or event.get("subtype") != "init":
@@ -152,6 +181,60 @@ def check_init(event: object) -> str | None:
     names = [s.get("name") if isinstance(s, dict) else s for s in servers]
     if names != [SERVER]:
         return f"servers differ from the pinned list: {names}"
+    # C1, second layer: settings.json stops the built-in plugins from loading; a plugin
+    # that loads anyway ran before this event, so the gate can only report it.
+    plugins = event.get("plugins")
+    if not isinstance(plugins, list):
+        return "init carries no plugin list"
+    if plugins:
+        found = sorted(str(p.get("source") if isinstance(p, dict) else p) for p in plugins)
+        return f"plugins loaded: {found}"
+    return None
+
+
+def _pinned_file(path: Path, pinned: frozenset[str]) -> bool:
+    """True only for a regular file, opened without following a link, whose sha256 is in
+    `pinned`. An empty pin set answers False without reading."""
+    if not pinned:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return False
+        return hashlib.sha256(f.read()).hexdigest() in pinned
+
+
+def _present(path: Path) -> bool:
+    try:
+        path.lstat()  # a dangling link is present
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def check_managed(
+    managed_dir: Path | None = None,
+    prefs: tuple[Path, ...] | None = None,
+    pinned: frozenset[str] | None = None,
+) -> str | None:
+    """C2: None when no managed-settings source is present, or every one present is a
+    pinned regular file. Otherwise the reason, naming the first entry found."""
+    managed_dir = MANAGED_DIR if managed_dir is None else managed_dir
+    prefs = MANAGED_PREFS if prefs is None else prefs
+    pinned = MANAGED_PINNED if pinned is None else pinned
+    for path in prefs:
+        if _present(path) and not _pinned_file(path, pinned):
+            return f"managed settings present: {path.name}"
+    if not _present(managed_dir):
+        return None
+    if managed_dir.is_symlink() or not managed_dir.is_dir():
+        return f"managed settings present: {managed_dir.name}"
+    for entry in sorted(managed_dir.iterdir()):
+        if not _pinned_file(entry, pinned):
+            return f"managed settings present: {entry.name}"
     return None
 
 
@@ -166,14 +249,70 @@ class CredentialUnavailable(Exception):
     pass
 
 
-def open_run_file(runs_dir: Path | None = None):
+class PromptUnavailable(Exception):
+    pass
+
+
+def load_prompt(path: Path, day: str) -> str:
+    """The bot's task, with the day to search from filled in by the launcher, never by a
+    mail. The prompt carries no safety (section 7): an absent or blank file is refused
+    only so the run file says why nothing ran, instead of a traceback."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PromptUnavailable(f"{path.name}: {type(exc).__name__}") from None
+    if not text.strip():
+        raise PromptUnavailable(f"{path.name} is blank")
+    prompt = text.replace(SINCE_TOKEN, day)
+    if len(prompt.encode()) > MAX_PROMPT_BYTES:
+        raise PromptUnavailable(f"{path.name} is too long for one pipe write")
+    return prompt
+
+
+def _digest():
+    """digest.py, loaded from beside this file by path, so no search path can shadow it."""
+    spec = importlib.util.spec_from_file_location("mailbox_autopilot_digest", DIGEST)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # its dataclass looks the module up there
+    spec.loader.exec_module(module)
+    return module
+
+
+def yesterday() -> str:
+    """The day the bot searches from and whose digest the run rebuilds. Computed here, so a
+    missing or broken digest.py cannot stop a session."""
+    return (datetime.now().date() - timedelta(days=1)).isoformat()
+
+
+def after_session(out, day: str, runs_dir: Path = RUNS_DIR, digests_dir: Path = DIGESTS_DIR):
+    """Rebuild the digest of `day` from every run file. A failure is noted and does not
+    change the run's exit code: the digest is a report, not a gate."""
+    try:
+        note(out, digest=_digest().build(day, runs_dir, digests_dir))
+    except Exception as exc:  # noqa: BLE001 - any failure is one line in the run file
+        note(out, digest_failed=type(exc).__name__)
+
+
+def open_run_file(runs_dir: Path | None = None, *, clock=None, sleep=time.sleep):
     """L5: one file per run, created 0600 and handed to whoever owns the runs directory.
     install.sh gives that directory to the owner, so no user name is written into this
-    public file. The bot never holds a run file: root reads the child's stdout and writes."""
+    public file. The bot never holds a run file: root reads the child's stdout and writes.
+
+    A name taken by a run in the same UTC second makes this one wait for the next second
+    (CodeRabbit 4500759964): the name's format and time order stay what digest.py reads."""
     runs_dir = RUNS_DIR if runs_dir is None else runs_dir
+    clock = clock or (lambda: datetime.now(UTC))
     runs_dir.mkdir(mode=0o700, exist_ok=True)
-    name = datetime.now(UTC).strftime("run-%Y%m%dT%H%M%SZ.jsonl")
-    fd = os.open(runs_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    for attempt in range(3):
+        now = clock()
+        name = now.strftime("run-%Y%m%dT%H%M%SZ.jsonl")
+        try:
+            fd = os.open(runs_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            if attempt == 2:
+                raise
+            sleep(1 - now.microsecond / 1e6)
     owner = runs_dir.stat().st_uid
     if owner != os.geteuid():
         os.fchown(fd, owner, -1)
@@ -185,14 +324,21 @@ def note(out, **fields) -> None:
     out.flush()
 
 
-def _kill(proc: subprocess.Popen) -> None:
+def _kill(proc: subprocess.Popen) -> bool:
+    """SIGKILL to the child's group, then a bounded wait (CodeRabbit 4500759967): a child
+    stuck in an uninterruptible sleep must not hold the launcher. False when it was not
+    reaped in time; the next run's pkill and the 05:30 retention job try again."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass  # macOS answers EPERM, not ESRCH, for a group with no live member left
     if proc.poll() is None:
         proc.kill()
-    proc.wait()
+    try:
+        proc.wait(timeout=KILL_WAIT_S)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
 
 
 def supervise(
@@ -231,7 +377,8 @@ def supervise(
         try:
             return _watch(proc, prompt, out, wall_clock_s, init_timeout_s)
         finally:
-            _kill(proc)
+            if not _kill(proc):
+                note(out, cleanup="child not reaped after SIGKILL")
     finally:
         signal.signal(signal.SIGTERM, previous)
 
@@ -317,17 +464,27 @@ def main() -> int:
         if (reason := check_claude_version(CLAUDE, build_env())) is not None:
             note(out, refused="version", reason=reason)
             return EXIT_VERSION
+        if (reason := check_managed()) is not None:
+            note(out, refused="managed", reason=reason)
+            return EXIT_MANAGED
+        day = yesterday()
+        try:
+            prompt = load_prompt(PROMPT_FILE, day)
+        except PromptUnavailable as exc:
+            note(out, refused="prompt", reason=str(exc))
+            return EXIT_PROMPT
         try:
             env = credential_step(build_env())
         except CredentialUnavailable as exc:
             note(out, refused="credential", reason=str(exc))
             return EXIT_CREDENTIAL
-        prompt = PROMPT_FILE.read_text(encoding="utf-8")
         try:
-            return supervise(build_argv(), env, prompt, out)
+            rc = supervise(build_argv(), env, prompt, out)
         except Terminated:
             note(out, refused="terminated")
             return EXIT_TERMINATED
+        after_session(out, day)
+        return rc
 
 
 if __name__ == "__main__":

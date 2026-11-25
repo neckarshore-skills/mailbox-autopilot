@@ -108,19 +108,57 @@ def test_the_installed_paths_are_the_launchers_paths():
     )
     assert _pin(LAUNCHER / "launch.sh", "UV") == plists.UV
     assert _pin(LAUNCHER / "install.sh", "BOT_USER") == gate.BOT_USER
-    for name in ("gate.py", "retention.py", "settings.json", "host.json", "launch.sh"):
+    for name in (
+        "digest.py",
+        "gate.py",
+        "host.json",
+        "launch.sh",
+        "prompt.txt",
+        "retention.py",
+        "settings.json",
+    ):
         assert name in text
 
 
 # ---- install.sh ----
 
 
-def test_install_refuses_anywhere_but_the_target_mac_as_root():
-    proc = subprocess.run(
-        ["bash", str(LAUNCHER / "install.sh"), "status"], capture_output=True, text=True
-    )
+def test_install_refuses_anywhere_but_the_target_mac_as_root(tmp_path):
+    """CodeRabbit 4507077158 on #102: run as root on the M1 itself, `status` passes the
+    guard, so the test pins HOST_WANTED to a name no machine has and holds on any host."""
+    script = (LAUNCHER / "install.sh").read_text()
+    assert 'HOST_WANTED="M1mini"' in script
+    copy = tmp_path / "install.sh"
+    copy.write_text(script.replace('HOST_WANTED="M1mini"', 'HOST_WANTED="no-such-host-x9"'))
+    proc = subprocess.run(["bash", str(copy), "status"], capture_output=True, text=True)
     assert proc.returncode == 2
-    assert re.search(r"target Mac only|runs on M1mini only|run it with sudo", proc.stderr)
+    assert re.search(r"target Mac only|runs on no-such-host-x9 only", proc.stderr)
+
+
+def _function(name: str) -> str:
+    text = (LAUNCHER / "install.sh").read_text()
+    start = text.index(f"{name}() {{")
+    return text[start : text.index("\n}\n", start)]
+
+
+def test_a_rerun_completes_an_account_an_interrupted_install_left_half_done():
+    """CodeRabbit 4507077128 on #102: install_user returned as soon as the account existed,
+    so group, membership and the hidden flag were never set after an install interrupted
+    behind sysadminctl. Each is now checked on every run. Not run here (dscl, root)."""
+    body = _function("install_user")
+    assert "return" not in body
+    assert body.index("sysadminctl -addUser") < body.index("IsHidden 1")
+    assert "dseditgroup -o checkmember" in body
+    assert 'dseditgroup -o read "$BOT_GROUP"' in body
+
+
+def test_an_existing_audit_log_is_checked_not_trusted():
+    """CodeRabbit 4507077134 on #102: a log left without sappend by a failed chflags was
+    reported as fine. Not run here (chflags sappend needs root)."""
+    body = _function("install_audit_log")
+    for check in ('[ ! -L "$log" ]', 'stat -f %Su "$log"', 'stat -f %Lp "$log"', "sappnd"):
+        assert check in body
+    assert body.count("chflags sappend") == 2
 
 
 def test_install_neither_loads_daemons_nor_edits_pf_conf():
@@ -233,3 +271,172 @@ def test_a_run_that_died_after_the_clear_is_healed_by_the_next(flagged_log):
     assert retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND) == 0
     assert flagged_log.stat().st_flags & stat.UF_APPEND
     assert sorted(p.name for p in flagged_log.parent.iterdir()) == ["host-audit.log"]
+
+
+# ---- stderr rotation (L13 files, L5 run-file class: 14 days) ----
+
+
+def test_the_rotated_files_are_the_plists_stderr_paths():
+    assert sorted(retention.STDERR_FILES) == sorted(
+        [
+            Path(plists.launcher()["StandardErrorPath"]),
+            Path(plists.retention()["StandardErrorPath"]),
+        ]
+    )
+
+
+def test_rotate_moves_a_filled_stderr_file_and_leaves_an_empty_one(tmp_path):
+    full, empty = tmp_path / "launcher.stderr", tmp_path / "retention.stderr"
+    full.write_text("uv refused\n")
+    empty.write_text("")
+    dest = tmp_path / "stderr"
+    moved = retention.rotate_stderr([full, empty, tmp_path / "absent.stderr"], dest, 1764000000.0)
+    assert moved == ["launcher.stderr-20251124T160000Z"]
+    assert empty.exists()
+    assert (dest / moved[0]).read_text() == "uv refused\n"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+
+
+def test_rotate_leaves_an_empty_owner_only_file_where_launchd_appends(tmp_path):
+    """C6: launchd creates a missing StandardErrorPath file 0644 whatever the Umask key
+    says, and appends to an existing one without touching its mode (both measured
+    2026-11-25 on macOS 27.2.1, gui domain, with and without Umask 63). So after a move,
+    and for a file that is absent, rotation leaves an empty 0600 file in the path."""
+    full, absent = tmp_path / "launcher.stderr", tmp_path / "retention.stderr"
+    full.write_text("x\n")
+    retention.rotate_stderr([full, absent], tmp_path / "stderr", time.time())
+    for path in (full, absent):
+        assert path.read_text() == ""
+        assert stat.S_IMODE(path.lstat().st_mode) == 0o600
+
+
+def test_install_creates_the_stderr_files_owner_only_before_launchd_does():
+    text = (LAUNCHER / "install.sh").read_text()
+    names = sorted(p.name for p in retention.STDERR_FILES)
+    assert f"for f in {' '.join(names)}; do" in text
+    assert 'install -o root -g wheel -m 600 /dev/null "$BASE/$f"' in text
+    assert 'chmod 600 "$BASE/$f"' in text
+
+
+def test_rotate_leaves_a_symlink_alone(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("x")
+    link = tmp_path / "launcher.stderr"
+    link.symlink_to(target)
+    assert retention.rotate_stderr([link], tmp_path / "stderr", time.time()) == []
+    assert link.is_symlink()
+
+
+def test_rotated_stderr_is_pruned_at_14_days(tmp_path):
+    dest = tmp_path / "stderr"
+    dest.mkdir()
+    old, new = dest / "launcher.stderr-old", dest / "launcher.stderr-new"
+    old.write_text("x")
+    new.write_text("y")
+    now = time.time()
+    os.utime(old, (now - 15 * 86400, now - 15 * 86400))
+    assert retention.prune_dir(dest, retention.RUN_DAYS, now) == ["launcher.stderr-old"]
+
+
+# ---- C3 (James, #101): the night gap is 11 hours, so retention kills leftovers too ----
+
+
+def test_retention_kills_the_bot_users_leftovers_first(tmp_path, monkeypatch, capsys):
+    seen = []
+    for name in ("RUNS_DIR", "DIGESTS_DIR", "HOST_AUDIT", "STDERR_DIR"):
+        monkeypatch.setattr(retention, name, tmp_path / name)
+    monkeypatch.setattr(retention, "STDERR_FILES", ())
+    monkeypatch.setattr(
+        retention.subprocess,
+        "run",
+        lambda argv, **k: seen.append(argv) or subprocess.CompletedProcess(argv, 0),
+    )
+    assert retention.main() == 0
+    assert seen == [["/usr/bin/pkill", "-KILL", "-U", "mailbox-autopilot-bot"]]
+    report = json.loads(capsys.readouterr().err)["retention"]
+    assert report["leftovers_killed"] is True
+
+
+def test_retention_and_the_gate_name_the_same_bot_user():
+    assert retention.BOT_USER == gate.BOT_USER
+
+
+# ---- C6 (James, #102): launchd creates the stderr files, so the umask is set there ----
+
+
+@pytest.mark.parametrize("which", ["launcher", "retention"])
+def test_both_daemons_run_with_an_owner_only_umask(which):
+    """Umask 0o077 (decimal 63, as plist integers are written), for the files a job
+    creates. Measured 2026-11-25 (macOS 27.2.1, gui domain): a file the job touched came
+    out 0600 with the key and 0644 without; the StandardErrorPath file launchd created
+    came out 0644 either way, which the two tests below cover. System domain: 5b run."""
+    p = getattr(plists, which)()
+    assert p["Umask"] == 0o077 == 63
+
+
+# ---- C7 (James, #102; CodeRabbit 4507077146, 4507077153): the audit log is a control ----
+
+
+def test_a_short_write_does_not_drop_audit_records(tmp_path, monkeypatch):
+    now = time.time()
+    log = tmp_path / "host-audit.log"
+    kept = "".join(_line(1, now, n=i) for i in range(20))
+    log.write_text(_line(91, now, n=-1) + kept)
+    real_write = os.write
+    monkeypatch.setattr(retention.os, "write", lambda fd, data: real_write(fd, data[:7]))
+    assert retention.prune_audit(log, 90, now, flag=None) == 1
+    assert log.read_text() == kept
+
+
+@darwin
+def test_a_failed_replace_puts_the_flag_back_and_says_so(flagged_log, monkeypatch):
+    now = time.time()
+    flagged_log.write_text(_line(91, now, n=1) + _line(1, now, n=2))
+    os.chflags(flagged_log, stat.UF_APPEND)
+
+    def refuse(src, dst):
+        raise OSError("replace refused")
+
+    monkeypatch.setattr(retention.os, "replace", refuse)
+    with pytest.raises(OSError, match="replace refused"):
+        retention.prune_audit(flagged_log, 90, now, flag=stat.UF_APPEND)
+    assert flagged_log.stat().st_flags & stat.UF_APPEND
+    assert len(flagged_log.read_text().splitlines()) == 2  # nothing lost
+
+
+# ---- CodeRabbit 4507077140 on #102: a timestamp without a time zone ----
+
+
+def test_a_timestamp_without_a_zone_is_kept_and_retention_goes_on(tmp_path):
+    """A naive time compared with the aware cutoff raised TypeError outside the parse
+    guard and stopped the whole retention run. A line whose time has no zone is kept,
+    like any line whose time cannot be read: losing a record is worse."""
+    now = time.time()
+    log = tmp_path / "host-audit.log"
+    naive = json.dumps({"timestamp": "2020-01-01T00:00:00", "n": 0}) + "\n"
+    log.write_text(naive + _line(91, now, n=1) + _line(1, now, n=2))
+    assert retention.prune_audit(log, 90, now, flag=None) == 1
+    assert [json.loads(x)["n"] for x in log.read_text().splitlines()] == [0, 2]
+
+
+# ---- James, #102 departure 3: backup exclusion is the owner's decision at install ----
+
+
+def test_the_backup_exclusion_asks_the_owner_and_defaults_to_no():
+    body = _function("install_backup_exclusion")
+    assert "</dev/tty" in body
+    assert "[y/N]" in body
+    assert 'case "$answer" in' in body and "y | Y)" in body
+    assert "tmutil addexclusion -p" in body
+    cmd = _function("cmd_install")
+    assert cmd.index("install_audit_log") < cmd.index("install_backup_exclusion")
+
+
+def test_the_excluded_paths_are_every_path_retention_prunes():
+    """A backup keeps what retention removes for as long as the backup lives, so the
+    exclusion covers exactly retention's paths."""
+    body = _function("install_backup_exclusion")
+    names = [retention.RUNS_DIR, retention.DIGESTS_DIR, retention.HOST_AUDIT,
+             retention.STDERR_DIR, *retention.STDERR_FILES]  # fmt: skip
+    for p in names:
+        assert f'"$BASE/{p.relative_to(retention.BASE)}"' in body
