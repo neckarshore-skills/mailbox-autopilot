@@ -142,7 +142,8 @@ def build_argv(
 
 def check_init(event: object) -> str | None:
     """L8: None when the first event is system/init and offers exactly the pinned tools
-    from exactly one server. Otherwise the reason, which goes to the run file."""
+    from exactly one server, with no plugin loaded. Otherwise the reason, which goes to
+    the run file."""
     if not isinstance(event, dict):
         return "first event is not an object"
     if event.get("type") != "system" or event.get("subtype") != "init":
@@ -160,6 +161,14 @@ def check_init(event: object) -> str | None:
     names = [s.get("name") if isinstance(s, dict) else s for s in servers]
     if names != [SERVER]:
         return f"servers differ from the pinned list: {names}"
+    # C1, second layer: settings.json stops the built-in plugins from loading; a plugin
+    # that loads anyway ran before this event, so the gate can only report it.
+    plugins = event.get("plugins")
+    if not isinstance(plugins, list):
+        return "init carries no plugin list"
+    if plugins:
+        found = sorted(str(p.get("source") if isinstance(p, dict) else p) for p in plugins)
+        return f"plugins loaded: {found}"
     return None
 
 

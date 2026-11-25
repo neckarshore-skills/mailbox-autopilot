@@ -34,6 +34,7 @@ gate = _load_gate()
 # Captured on the laptop, Claude Code 2.1.317, from build_argv() with the launcher's
 # environment and a throwaway stdio server named `mailbox` offering search and read.
 # Session id, paths and capability flags removed; the fields the gate reads are verbatim.
+# `plugins` is [] with the bot's settings.json (C1, measured 2026-11-25 on 2.1.317, 4 of 4).
 GOOD_INIT = {
     "type": "system",
     "subtype": "init",
@@ -41,6 +42,7 @@ GOOD_INIT = {
     "mcp_servers": [{"name": "mailbox", "status": "connected", "source": "dynamic"}],
     "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
     "skills": [],
+    "plugins": [],
     "slash_commands": [],
     "permissionMode": "default",
     "apiKeySource": "none",
@@ -101,6 +103,20 @@ def _survived_later(tmp_path) -> bool:
     return (tmp_path / "survived").exists()
 
 
+# One entry of the init's `plugins` list without the bot's settings (2.1.317, verbatim).
+BUILTIN_PRIVACY = {
+    "name": "cc-plugin-privacy",
+    "path": "builtin",
+    "source": "cc-plugin-privacy@builtin",
+}
+# The three built-ins 2.1.317 loads despite --setting-sources "" (#76 comment 6613844998).
+MEASURED_BUILTINS = {
+    "cc-plugin-agents-md@builtin",
+    "cc-plugin-privacy@builtin",
+    "cc-plugin-plugin-authoring@builtin",
+}
+
+
 # ---- L8, the init gate ----
 
 
@@ -122,6 +138,9 @@ def test_good_init_runs_and_every_line_reaches_the_run_file(tmp_path):
         {"mcp_servers": []},
         {"tools": None},
         {"subtype": "status"},
+        {"plugins": [BUILTIN_PRIVACY]},
+        {"plugins": None},
+        {"plugins": "cc-plugin-privacy"},
     ],
     ids=[
         "bash",
@@ -133,6 +152,9 @@ def test_good_init_runs_and_every_line_reaches_the_run_file(tmp_path):
         "no-server",
         "no-tools",
         "not-init",
+        "builtin-plugin",
+        "no-plugin-list",
+        "plugins-not-a-list",
     ],
 )
 def test_a_mismatched_init_kills_the_child_before_it_can_go_on(tmp_path, change):
@@ -143,6 +165,13 @@ def test_a_mismatched_init_kills_the_child_before_it_can_go_on(tmp_path, change)
     assert lines[-1]["launcher"]["refused"] == "gate"
     assert {"type": "assistant"} not in lines
     assert not survived
+
+
+def test_an_init_without_a_plugin_list_is_refused(tmp_path):
+    init = {k: v for k, v in GOOD_INIT.items() if k != "plugins"}
+    rc, lines, _ = _run(tmp_path, [init, {"type": "assistant"}])
+    assert rc == gate.EXIT_GATE
+    assert lines[-1]["launcher"] == {"refused": "gate", "reason": "init carries no plugin list"}
 
 
 def test_a_first_line_that_is_not_json_is_refused(tmp_path):
@@ -449,6 +478,16 @@ def test_the_bot_settings_turn_auto_memory_off_and_deny_built_in_tools():
     )
     assert "allow" not in settings["permissions"]
     assert "hooks" not in settings and "env" not in settings
+
+
+def test_the_bot_settings_shut_the_built_in_plugins_off_at_load():
+    """C1 (James, #101): pinning `plugins` in init detects after the fact; these two keys
+    stop the built-ins from loading. Measured on 2.1.317: both keys give `plugins: []`;
+    disableAllHooks alone puts a system/ui_invalidate event before init, which the gate
+    would refuse on every run, so the two keys belong together."""
+    settings = json.loads((LAUNCHER / "settings.json").read_text())
+    assert settings["disableAllHooks"] is True
+    assert settings["enabledPlugins"] == dict.fromkeys(MEASURED_BUILTINS, False)
 
 
 def test_launch_never_follows_a_link_planted_in_the_owners_runs_directory(tmp_path):
